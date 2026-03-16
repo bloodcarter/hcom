@@ -71,8 +71,14 @@ pub fn do_resume(
         return do_resume_by_session_id(&name, fork, extra_args, flags, &db);
     }
 
-    // If not a UUID and not a known hcom instance, try resolving as a Codex thread name
+    // If not a UUID and not a known hcom instance, try resolving as a thread name
     if matches!(db.get_instance_full(&name), Ok(None) | Err(_)) {
+        // Try Claude Code thread name first (most common)
+        if let Some(session_id) = resolve_claude_thread_name(&name) {
+            eprintln!("Resolved Claude thread '{}' → {}", name, session_id);
+            return do_resume_by_session_id(&session_id, fork, extra_args, flags, &db);
+        }
+        // Then Codex thread name
         if let Some(session_id) = resolve_codex_thread_name(&name) {
             eprintln!("Resolved Codex thread '{}' → {}", name, session_id);
             return do_resume_by_session_id(&session_id, fork, extra_args, flags, &db);
@@ -441,6 +447,75 @@ fn resolve_codex_thread_name(name: &str) -> Option<String> {
                     // Keep the most recently updated match
                     if best_match.as_ref().map_or(true, |(_, prev_updated)| updated > *prev_updated) {
                         best_match = Some((id, updated));
+                    }
+                }
+            }
+        }
+    }
+
+    best_match.map(|(id, _)| id)
+}
+
+/// Resolve a Claude Code thread name (e.g. "skills-work") to a session UUID
+/// by scanning ~/.claude/projects/*/*.jsonl for {"type":"custom-title","customTitle":"..."} entries.
+fn resolve_claude_thread_name(name: &str) -> Option<String> {
+    let projects_dir = claude_config_dir().join("projects");
+    if !projects_dir.is_dir() {
+        return None;
+    }
+
+    let mut best_match: Option<(String, std::time::SystemTime)> = None;
+
+    let entries = std::fs::read_dir(&projects_dir).ok()?;
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let sub_entries = match std::fs::read_dir(entry.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for sub_entry in sub_entries.flatten() {
+            let path = sub_entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // Quick check: grep for the thread name in the filename? No — it's in the content.
+            // Read the file looking for custom-title lines.
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let reader = std::io::BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                if !line.contains("custom-title") {
+                    continue;
+                }
+                let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
+                    if parsed.get("customTitle").and_then(|v| v.as_str()) == Some(name) {
+                        if let Some(session_id) = parsed.get("sessionId").and_then(|v| v.as_str()) {
+                            // Use file modification time to pick the most recent match
+                            let mtime = sub_entry
+                                .metadata()
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            if best_match
+                                .as_ref()
+                                .map_or(true, |(_, prev_mtime)| mtime > *prev_mtime)
+                            {
+                                best_match = Some((session_id.to_string(), mtime));
+                            }
+                        }
+                        break; // Only one custom-title per file
                     }
                 }
             }
@@ -899,6 +974,41 @@ mod tests {
             }
         }
         assert_eq!(best.unwrap().0, "bbb-new");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_claude_thread_name_found() {
+        let dir = std::env::temp_dir().join("hcom_test_claude_thread");
+        let project_dir = dir.join("projects").join("-test-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_file = project_dir.join("abcd1234-5678-9012-3456-789012345678.jsonl");
+        std::fs::write(
+            &session_file,
+            r#"{"type":"user","cwd":"/test","message":"hello"}
+{"type":"custom-title","customTitle":"my-cool-session","sessionId":"abcd1234-5678-9012-3456-789012345678"}
+{"type":"assistant","message":"hi"}
+"#,
+        )
+        .unwrap();
+
+        // Test the parsing logic directly (can't override claude_config_dir)
+        let file = std::fs::File::open(&session_file).unwrap();
+        let reader = std::io::BufReader::new(file);
+        let mut found_id = None;
+        for line in reader.lines() {
+            let line = line.unwrap();
+            if !line.contains("custom-title") {
+                continue;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if parsed.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
+                if parsed.get("customTitle").and_then(|v| v.as_str()) == Some("my-cool-session") {
+                    found_id = parsed.get("sessionId").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+            }
+        }
+        assert_eq!(found_id, Some("abcd1234-5678-9012-3456-789012345678".to_string()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
