@@ -149,8 +149,8 @@ RULES:
    If the plan says 'copy verbatim', copy the file — do not rewrite it.
    If the plan says 'Docker + real Electron', build Docker + real Electron — do not substitute Jest mocks.
    If the plan says '~200 lines', aim for that — do not build a 1000-line reimplementation.
-3. When you finish a phase, report completion via hcom with EXACTLY this format:
-   hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: <phase_name>'
+3. When you finish a phase, report completion via hcom. Include 'PHASE_DONE: <phase_name>' in any message.
+   Example: hcom send '@bigboss' --intent inform -- 'PHASE_DONE: <phase_name> — summary of what was done'
 4. If the auditor rejects your work (FAIL), you will receive specific failures. Fix them and report again.
 5. You CANNOT override the auditor. If you disagree, say so in your report — the human will decide.
 6. Do NOT delegate to sub-agents without including the VERBATIM plan requirements from the plan file.
@@ -361,9 +361,8 @@ Read the plan file at ${plan_abs} and implement this phase.
 Extract the EXACT requirements for this phase from the plan.
 Implement each one literally — do not simplify or substitute.
 
-When done, report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'
-
-If you cannot meet a requirement, report PHASE_BLOCKED with the specific requirement and why." 2>&1 || true
+When done, send a message containing 'PHASE_DONE: ${phase}' (to any agent or bigboss).
+If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with the specific requirement and why." 2>&1 || true
 
   echo "  Assigned to implementer" >&2
 
@@ -494,7 +493,7 @@ ${audit_text}
 Fix ALL FAIL items. Each requirement must be met LITERALLY as stated in the plan.
 Do not substitute alternatives. If you cannot meet a requirement, report PHASE_BLOCKED.
 
-When fixed, report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
+When fixed, send a message containing 'PHASE_DONE: ${phase}' (to any agent or bigboss).'" 2>/dev/null || true
 
             echo "  Sent failures to implementer" >&2
             break  # Back to waiting for PHASE_DONE
