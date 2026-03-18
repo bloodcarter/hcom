@@ -268,9 +268,8 @@ track_launch "$launch_out"
 audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
 echo "  Auditor: $audit_name" >&2
 
-# Subscribe to idle events
-hcom events sub --idle "$impl_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
-hcom events sub --idle "$audit_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
+# No event subscriptions — the listen loop with --type message handles everything.
+# Subscriptions would create noise in the TUI and pollute the message queue.
 
 # Clear trap (successful launch)
 trap - ERR
