@@ -127,10 +127,13 @@ batch_id="plan-exec-$(date +%s)"
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# Register controller identity (needed for --name on send/listen)
-hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
-# Remove the auto-created collision subscription to reduce TUI noise
-hcom events unsub "$(hcom events sub list 2>/dev/null | grep plan-exec-ctrl | grep collision | awk '{print $1}')" --name plan-exec-ctrl >/dev/null 2>&1 || true
+# Register controller identity (needed for --name on send/events)
+ctrl_name="pexc"
+hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
+# Remove the auto-created collision subscription to eliminate TUI noise
+sleep 1
+collision_sub=$(hcom events sub list 2>/dev/null | grep "$ctrl_name" | grep collision | awk '{print $1}')
+[[ -n "$collision_sub" ]] && hcom events unsub "$collision_sub" --name "$ctrl_name" >/dev/null 2>&1 || true
 
 trap cleanup ERR
 
@@ -147,7 +150,7 @@ RULES:
    If the plan says 'Docker + real Electron', build Docker + real Electron — do not substitute Jest mocks.
    If the plan says '~200 lines', aim for that — do not build a 1000-line reimplementation.
 3. When you finish a phase, report completion via hcom with EXACTLY this format:
-   hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: <phase_name>'
+   hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: <phase_name>'
 4. If the auditor rejects your work (FAIL), you will receive specific failures. Fix them and report again.
 5. You CANNOT override the auditor. If you disagree, say so in your report — the human will decide.
 6. Do NOT delegate to sub-agents without including the VERBATIM plan requirements from the plan file.
@@ -213,7 +216,7 @@ HOW TO AUDIT each requirement:
 6. For 'wire into X' requirements: trace the actual integration point
 
 REPORT FORMAT — use EXACTLY this:
-hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: <phase_name>
+hcom send '@${ctrl_name}' --intent inform -- 'AUDIT_RESULT: <phase_name>
 VERDICT: PASS|FAIL
 <requirement>: PASS|FAIL — <specific file:line evidence>'
 
@@ -351,14 +354,14 @@ for i in "${!phases[@]}"; do
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
 
   # Send phase assignment to implementer
-  hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
+  hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
     "PHASE ASSIGNMENT: ${phase}
 
 Read the plan file at ${plan_abs} and implement this phase.
 Extract the EXACT requirements for this phase from the plan.
 Implement each one literally — do not simplify or substitute.
 
-When done, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'
+When done, report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'
 
 If you cannot meet a requirement, report PHASE_BLOCKED with the specific requirement and why." 2>&1 || true
 
@@ -389,7 +392,7 @@ print(text)
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
       # Send audit request
-      hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
+      hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- \
         "AUDIT REQUEST: ${phase}
 
 Read the plan file at ${plan_abs}. Extract the EXACT requirements for: ${phase}
@@ -399,7 +402,7 @@ Then verify the SUBSTANCE of the implementation — read actual file contents, d
 For EACH requirement: PASS or FAIL with specific file:line evidence. PARTIAL = FAIL.
 
 Report:
-hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: ${phase}
+hcom send '@${ctrl_name}' --intent inform -- 'AUDIT_RESULT: ${phase}
 VERDICT: PASS|FAIL
 <requirement>: PASS|FAIL — <evidence>
 ...'" 2>/dev/null || true
@@ -437,7 +440,7 @@ print(text)
               echo "  MAX RETRIES REACHED for phase: ${phase}" >&2
               echo "  Escalating to bigboss..." >&2
 
-              hcom send "@bigboss" --name plan-exec-ctrl --intent request -- \
+              hcom send "@bigboss" --name "$ctrl_name" --intent request -- \
                 "ESCALATION: Phase '${phase}' failed audit ${max_retries} times.
 
 Last audit result:
@@ -457,7 +460,7 @@ if not line: sys.exit(1)
 d = json.loads(line)
 if d.get('id',0) <= $boss_seen_id: sys.exit(1)
 fr = d.get('data',{}).get('from','')
-if fr in ('[hcom-events]', 'plan-exec-ctrl', '$impl_name', '$audit_name'): sys.exit(1)
+if fr in ('[hcom-events]', '${ctrl_name}', '${impl_name}', '${audit_name}'): sys.exit(1)
 print(d.get('data',{}).get('text',''))
 " 2>/dev/null) || continue
                 [[ -z "\$boss_text" ]] && continue
@@ -482,7 +485,7 @@ print(d.get('data',{}).get('text',''))
             fi
 
             # Send failures to implementer
-            hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
+            hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
               "AUDIT FAILED for phase: ${phase} (attempt ${retries}/${max_retries})
 
 Auditor findings:
@@ -491,7 +494,7 @@ ${audit_text}
 Fix ALL FAIL items. Each requirement must be met LITERALLY as stated in the plan.
 Do not substitute alternatives. If you cannot meet a requirement, report PHASE_BLOCKED.
 
-When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
+When fixed, report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
 
             echo "  Sent failures to implementer" >&2
             break  # Back to waiting for PHASE_DONE
@@ -506,7 +509,7 @@ When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: 
       echo "  PHASE BLOCKED: ${phase}" >&2
       echo "  ${msg_text}" >&2
 
-      hcom send "@bigboss" --name plan-exec-ctrl --intent request -- \
+      hcom send "@bigboss" --name "$ctrl_name" --intent request -- \
         "BLOCKED: Phase '${phase}' — ${msg_text}
 
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
@@ -520,7 +523,7 @@ if not line: sys.exit(1)
 d = json.loads(line)
 if d.get('id',0) <= ${boss_seen_id:-0}: sys.exit(1)
 fr = d.get('data',{}).get('from','')
-if fr in ('[hcom-events]', 'plan-exec-ctrl', '$impl_name', '$audit_name'): sys.exit(1)
+if fr in ('[hcom-events]', '${ctrl_name}', '${impl_name}', '${audit_name}'): sys.exit(1)
 print(d.get('data',{}).get('text',''))
 " 2>/dev/null) || continue
         [[ -z "$boss_text" ]] && continue
@@ -530,10 +533,10 @@ print(d.get('data',{}).get('text',''))
         elif echo "$boss_text" | grep -iq "abort\|stop\|cancel"; then
           cleanup; exit 1
         else
-          hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
+          hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
             "Bigboss guidance: ${boss_text}
 
-Try again. Report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
+Try again. Report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
           break
         fi
       done
@@ -548,7 +551,7 @@ echo "=== PLAN EXECUTION COMPLETE ===" >&2
 echo "Completed: ${completed}/${total_phases} phases (${skipped} skipped)" >&2
 echo "Plan: ${plan_abs}" >&2
 
-hcom send "@bigboss" --name plan-exec-ctrl --intent inform -- \
+hcom send "@bigboss" --name "$ctrl_name" --intent inform -- \
   "PLAN EXECUTION COMPLETE: ${completed}/${total_phases} phases passed audit.
 Plan: ${plan_abs}
 All audited phases have independent PASS verification." 2>/dev/null || true
