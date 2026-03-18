@@ -364,7 +364,7 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
 
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
-    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null)
+    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null)
     # Empty or failed listen — sleep to avoid tight loop, then retry
     if [[ -z "$msg" ]]; then
       sleep 5
@@ -414,7 +414,7 @@ VERDICT: PASS|FAIL
 
       # Wait for audit result
       while true; do
-        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null)
+        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null)
         if [[ -z "$audit_msg" ]]; then
           sleep 5
           continue
@@ -465,7 +465,7 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
               echo "  Waiting for bigboss decision..." >&2
 
               while true; do
-                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
+                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
                   echo "  Still waiting for bigboss..." >&2
                   continue
                 }
@@ -535,7 +535,7 @@ When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: 
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
       while true; do
-        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || continue
+        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || continue
         boss_text=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
