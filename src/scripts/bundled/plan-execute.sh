@@ -48,6 +48,7 @@ Only the human (bigboss) can override an auditor FAIL.
 
 Options:
   --plan PATH             Path to the approved plan file (required)
+  --start-phase N         Start from phase N, skipping earlier phases (default: 1)
   --name NAME             Your hcom identity
   --tool TOOL             AI tool for agents (default: claude)
   --impl-tool TOOL        Override tool for implementer only
@@ -59,7 +60,7 @@ Options:
 
 Examples:
   hcom run plan-execute --plan docs/plans/my-feature.md
-  hcom run plan-execute --plan docs/plans/refactor.md --max-retries 5
+  hcom run plan-execute --plan docs/plans/refactor.md --start-phase 3
   hcom run plan-execute --plan docs/plans/v2.md --impl-tool claude --audit-tool codex
 EOF
   exit 0
@@ -72,6 +73,7 @@ tool="claude"
 impl_tool=""
 audit_tool=""
 max_retries=3
+start_phase=1
 branch=""
 work_dir=""
 
@@ -79,6 +81,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage ;;
     --plan) plan_path="$2"; shift 2 ;;
+    --start-phase) start_phase="$2"; shift 2 ;;
     --name) name_flag="$2"; shift 2 ;;
     --tool) tool="$2"; shift 2 ;;
     --impl-tool) impl_tool="$2"; shift 2 ;;
@@ -236,11 +239,14 @@ import re, sys
 with open('$plan') as f:
     content = f.read()
 
-# Find phase/step/section headers (## Phase N, ## Step N, numbered items, etc.)
+# Find phase/step/section headers at any heading depth (##, ###, ####)
+# Matches: '## Phase 1: Foundation (3 days)', '### Step 2 — Voice Pipeline', etc.
 phases = []
-for m in re.finditer(r'^##\s+(Phase\s+\d+|Step\s+\d+|Stage\s+\d+)[:\s—–-]*(.*)', content, re.MULTILINE | re.IGNORECASE):
+for m in re.finditer(r'^#{2,4}\s+(Phase\s+\d+|Step\s+\d+|Stage\s+\d+)[:\s—–-]*(.*)', content, re.MULTILINE | re.IGNORECASE):
     name = m.group(1).strip()
     desc = m.group(2).strip(' :—–-')
+    # Remove trailing parenthetical like '(3 days)'
+    desc = re.sub(r'\s*\(\d+\s+days?\)\s*$', '', desc).strip()
     phases.append(f'{name}: {desc}' if desc else name)
 
 # If no Phase/Step headers, try numbered top-level items
@@ -275,17 +281,29 @@ for i in "${!phases[@]}"; do
   echo "  $((i+1)). ${phases[$i]}" >&2
 done
 echo "" >&2
-echo "Starting execution..." >&2
+if [[ $start_phase -gt 1 ]]; then
+  echo "Starting from phase ${start_phase} (skipping earlier phases)..." >&2
+else
+  echo "Starting execution..." >&2
+fi
 
 # --- Execution Loop ---
 
 total_phases=${#phases[@]}
 completed=0
+skipped=0
 
 for i in "${!phases[@]}"; do
   phase="${phases[$i]}"
   phase_num=$((i+1))
   retries=0
+
+  # Skip phases before start_phase
+  if [[ $phase_num -lt $start_phase ]]; then
+    echo "  Skipping phase ${phase_num}: ${phase} (already completed)" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
 
   echo "" >&2
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
@@ -586,7 +604,7 @@ done
 
 echo "" >&2
 echo "=== PLAN EXECUTION COMPLETE ===" >&2
-echo "Completed: ${completed}/${total_phases} phases" >&2
+echo "Completed: ${completed}/${total_phases} phases (${skipped} skipped)" >&2
 echo "Plan: ${plan_abs}" >&2
 
 # Final summary to bigboss
