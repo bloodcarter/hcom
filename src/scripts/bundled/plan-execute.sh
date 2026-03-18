@@ -389,8 +389,8 @@ try:
 except: print('')
 " 2>/dev/null)
 
-    # Skip event notifications and system messages
-    [[ "$msg_from" == "[hcom-events]" || -z "$msg_text" ]] && continue
+    # Skip event notifications, system messages, and our own messages
+    [[ "$msg_from" == "[hcom-events]" || "$msg_from" == "plan-exec-ctrl" || -z "$msg_text" ]] && continue
 
     # Check for PHASE_DONE
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
@@ -440,7 +440,9 @@ try:
 except: print('')
 " 2>/dev/null)
 
-        [[ "$audit_from" == "[hcom-events]" || -z "$audit_text" ]] && continue
+        # Only process messages from the auditor — skip our own and implementer's
+        [[ "$audit_from" == "[hcom-events]" || "$audit_from" == "plan-exec-ctrl" || -z "$audit_text" ]] && continue
+        [[ "$audit_from" != "$audit_name" ]] && continue
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
           if echo "$audit_text" | grep -qP "^VERDICT: PASS\s*$"; then
