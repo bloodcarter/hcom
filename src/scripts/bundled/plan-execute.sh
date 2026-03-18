@@ -374,12 +374,18 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
-      # Send audit request + wake up Codex
-      audit_request="AUDIT REQUEST: ${phase}. Read plan at ${plan_abs}, extract requirements for this phase, read actual code, check SUBSTANCE not just existence. For each requirement: PASS or FAIL with file:line evidence. Report via: hcom send @bigboss --intent inform --name ${audit_name} -- the full AUDIT_RESULT with VERDICT: PASS or FAIL"
-      hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
+      # Send audit request — inject directly into terminal for Codex
+      audit_request="AUDIT REQUEST: ${phase}. Read plan at ${plan_abs}, extract EXACT requirements for this phase, read actual code, check SUBSTANCE not existence. For each requirement: PASS or FAIL with file:line evidence. Report via: hcom send @bigboss --intent inform --name ${audit_name} -- AUDIT_RESULT and VERDICT"
       if [[ "$audit_tool" == "codex" ]]; then
-        sleep 2
-        hcom term inject "$audit_name" --enter 2>/dev/null || true
+        # Wait for Codex to be idle at prompt
+        for _w in $(seq 1 12); do
+          ready=$(hcom term "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('ready',''))" 2>/dev/null)
+          [[ "$ready" == "true" ]] && break
+          sleep 5
+        done
+        hcom term inject "$audit_name" "$audit_request" --enter 2>/dev/null || true
+      else
+        hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
       fi
 
       echo "  Audit requested" >&2
