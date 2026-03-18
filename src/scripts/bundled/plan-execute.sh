@@ -109,6 +109,17 @@ fi
 [[ -z "$impl_tool" ]] && impl_tool="$tool"
 [[ -z "$audit_tool" ]] && audit_tool="$tool"
 
+# Build permission-bypass flags per tool type
+skip_perms_flag() {
+  case "$1" in
+    claude) echo "--dangerously-skip-permissions" ;;
+    codex)  echo "--dangerously-bypass-approvals-and-sandbox" ;;
+    *)      echo "" ;;
+  esac
+}
+impl_skip=$(skip_perms_flag "$impl_tool")
+audit_skip=$(skip_perms_flag "$audit_tool")
+
 # Resolve caller
 name_arg=""
 [[ -n "$name_flag" ]] && name_arg="--name $name_flag"
@@ -160,7 +171,7 @@ launch_out=$(hcom 1 "$impl_tool" --tag plan-impl --go \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
-  $dir_flag 2>&1) || {
+  $dir_flag $impl_skip 2>&1) || {
   echo "Error: Failed to launch implementer" >&2
   exit 1
 }
@@ -206,7 +217,7 @@ launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
-  $dir_flag 2>&1) || {
+  $dir_flag $audit_skip 2>&1) || {
   echo "Error: Failed to launch auditor" >&2
   exit 1
 }
