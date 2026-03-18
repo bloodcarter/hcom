@@ -167,17 +167,34 @@ Start by reading the plan file and waiting for your first phase assignment."
 impl_prompt="Read the plan file at ${plan_abs} and wait for your phase assignment via hcom."
 
 echo "Launching implementer (${impl_tool})..." >&2
-launch_out=$(hcom 1 "$impl_tool" --tag plan-impl \
+impl_launch_file=$(mktemp)
+hcom 1 "$impl_tool" --tag plan-impl \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
-  $dir_flag $impl_skip --headless 2>&1) || {
-  echo "Error: Failed to launch implementer" >&2
-  exit 1
-}
-track_launch "$launch_out"
+  $dir_flag $impl_skip > "$impl_launch_file" 2>&1 &
+impl_launch_pid=$!
 
-impl_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
+# Wait for Names: to appear in output (up to 30s)
+impl_name=""
+for _i in $(seq 1 15); do
+  if grep -q '^Names: ' "$impl_launch_file" 2>/dev/null; then
+    impl_name=$(grep '^Names: ' "$impl_launch_file" | sed 's/^Names: //' | tr -d ' ')
+    break
+  fi
+  sleep 2
+done
+
+if [[ -z "$impl_name" ]]; then
+  echo "Error: Failed to launch implementer (no name after 30s)" >&2
+  cat "$impl_launch_file" >&2
+  kill $impl_launch_pid 2>/dev/null || true
+  rm -f "$impl_launch_file"
+  exit 1
+fi
+rm -f "$impl_launch_file"
+LAUNCHED_NAMES+=("$impl_name")
+
 echo "  Implementer: $impl_name — waiting for ready..." >&2
 
 # Wait for implementer to be ready (up to 120s)
@@ -221,17 +238,34 @@ Wait for audit requests."
 audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure, then wait for audit requests via hcom."
 
 echo "Launching auditor (${audit_tool})..." >&2
-launch_out=$(hcom 1 "$audit_tool" --tag plan-audit \
+audit_launch_file=$(mktemp)
+hcom 1 "$audit_tool" --tag plan-audit \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
-  $dir_flag $audit_skip --headless 2>&1) || {
-  echo "Error: Failed to launch auditor" >&2
-  exit 1
-}
-track_launch "$launch_out"
+  $dir_flag $audit_skip > "$audit_launch_file" 2>&1 &
+audit_launch_pid=$!
 
-audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
+# Wait for Names: to appear in output (up to 30s)
+audit_name=""
+for _i in $(seq 1 15); do
+  if grep -q '^Names: ' "$audit_launch_file" 2>/dev/null; then
+    audit_name=$(grep '^Names: ' "$audit_launch_file" | sed 's/^Names: //' | tr -d ' ')
+    break
+  fi
+  sleep 2
+done
+
+if [[ -z "$audit_name" ]]; then
+  echo "Error: Failed to launch auditor (no name after 30s)" >&2
+  cat "$audit_launch_file" >&2
+  kill $audit_launch_pid 2>/dev/null || true
+  rm -f "$audit_launch_file"
+  exit 1
+fi
+rm -f "$audit_launch_file"
+LAUNCHED_NAMES+=("$audit_name")
+
 echo "  Auditor: $audit_name — waiting for ready..." >&2
 
 # Wait for auditor to be ready (up to 120s)
