@@ -235,7 +235,10 @@ AUDIT_EOF
 
 if [[ "$audit_tool" == "codex" ]]; then
   audit_launch_system=""
-  audit_launch_prompt="You are a plan compliance auditor. Read your full instructions at ${audit_instructions_file} then read the plan at ${plan_abs}. Wait for audit requests via hcom."
+  audit_launch_prompt="You are a plan compliance auditor. Read your full instructions at ${audit_instructions_file} then read the plan at ${plan_abs}.
+
+HOW TO RECEIVE MESSAGES: You are a Codex agent. Messages arrive as <hcom> notification tags in your terminal. When you see one, run: hcom listen --timeout 2 --name \$(hcom list self --json | jq -r .name)
+This retrieves the full message body. After processing, end your turn to receive the next message. If no <hcom> tag arrives, just end your turn — you will be woken up when a message arrives."
 else
   audit_launch_system="$audit_system"
   audit_launch_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
