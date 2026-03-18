@@ -127,8 +127,10 @@ batch_id="plan-exec-$(date +%s)"
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# No hcom start — use --name plan-exec-ctrl on all commands directly.
-# hcom start creates a collision subscription that generates TUI noise.
+# Register controller identity (needed for --name on send/listen)
+hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
+# Remove the auto-created collision subscription to reduce TUI noise
+hcom events unsub "$(hcom events sub list 2>/dev/null | grep plan-exec-ctrl | grep collision | awk '{print $1}')" --name plan-exec-ctrl >/dev/null 2>&1 || true
 
 trap cleanup ERR
 
