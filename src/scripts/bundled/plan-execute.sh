@@ -125,7 +125,7 @@ name_arg=""
 [[ -n "$name_flag" ]] && name_arg="--name $name_flag"
 
 caller_name=""
-caller_json=$(hcom list self --json $name_arg 2>/dev/null) && {
+caller_json=$(hcom list self --json --name plan-exec-ctrl 2>/dev/null) && {
   caller_name=$(echo "$caller_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])" 2>/dev/null)
 } || caller_name="bigboss"
 
@@ -245,11 +245,11 @@ echo "  Auditor ready" >&2
 # --- Controller Identity ---
 
 # Start controller identity for message routing
-hcom start --as plan-exec-ctrl $name_arg >/dev/null 2>/dev/null || true
+hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
 
 # Subscribe to messages from both agents
-hcom events sub --idle "$impl_name" $name_arg >/dev/null 2>/dev/null || true
-hcom events sub --idle "$audit_name" $name_arg >/dev/null 2>/dev/null || true
+hcom events sub --idle "$impl_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
+hcom events sub --idle "$audit_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
 
 # Clear trap (successful launch)
 trap - ERR
@@ -336,7 +336,7 @@ for i in "${!phases[@]}"; do
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
 
   # Send phase assignment to implementer
-  hcom send "@${impl_name}" $name_arg --intent request -- \
+  hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
     "PHASE ASSIGNMENT: ${phase}
 
 Read the plan file at ${plan_abs} and implement this phase.
@@ -345,16 +345,16 @@ Implement each one literally — do not simplify or substitute.
 
 When done, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'
 
-If you cannot meet a requirement, report PHASE_BLOCKED with the specific requirement and why." 2>/dev/null
+If you cannot meet a requirement, report PHASE_BLOCKED with the specific requirement and why." 2>&1 || true
 
   echo "  Assigned to implementer" >&2
 
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
     # Listen for messages (controller waits here)
-    msg=$(hcom listen --timeout 300 --json $name_arg 2>/dev/null) || {
+    msg=$(hcom listen --timeout 300 --json --name plan-exec-ctrl 2>/dev/null) || {
       echo "  Timeout waiting for implementer (5 min). Nudging..." >&2
-      hcom send "@${impl_name}" $name_arg --intent request -- \
+      hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
         "Status check: are you still working on phase '${phase}'? Report progress." 2>/dev/null
       continue
     }
@@ -399,7 +399,7 @@ except:
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
       # Send audit request to auditor
-      hcom send "@${audit_name}" $name_arg --intent request -- \
+      hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
         "AUDIT REQUEST: ${phase}
 
 Read the plan file at ${plan_abs}. Extract the EXACT requirements for: ${phase}
@@ -418,9 +418,9 @@ VERDICT: PASS|FAIL
 
       # Wait for audit result
       while true; do
-        audit_msg=$(hcom listen --timeout 300 --json $name_arg 2>/dev/null) || {
+        audit_msg=$(hcom listen --timeout 300 --json --name plan-exec-ctrl 2>/dev/null) || {
           echo "  Timeout waiting for auditor. Nudging..." >&2
-          hcom send "@${audit_name}" $name_arg --intent request -- \
+          hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
             "Status check: audit for phase '${phase}' — please report your findings." 2>/dev/null
           continue
         }
@@ -474,7 +474,7 @@ except:
 
               # Notify bigboss
               if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-                hcom send "@${caller_name}" $name_arg --intent request -- \
+                hcom send "@${caller_name}" --name plan-exec-ctrl --intent request -- \
                   "ESCALATION: Phase '${phase}' failed audit ${max_retries} times.
 
 Last audit result:
@@ -493,7 +493,7 @@ Respond with your decision." 2>/dev/null
 
               # Wait for bigboss decision
               while true; do
-                boss_msg=$(hcom listen --timeout 600 --json $name_arg 2>/dev/null) || {
+                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
                   echo "  Still waiting for bigboss (10 min timeout)..." >&2
                   continue
                 }
@@ -543,7 +543,7 @@ except: print('')
             fi
 
             # Send failures to implementer for fixing
-            hcom send "@${impl_name}" $name_arg --intent request -- \
+            hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
               "AUDIT FAILED for phase: ${phase} (attempt ${retries}/${max_retries})
 
 Auditor findings:
@@ -571,7 +571,7 @@ When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: 
       echo "  Escalating to bigboss..." >&2
 
       if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-        hcom send "@${caller_name}" $name_arg --intent request -- \
+        hcom send "@${caller_name}" --name plan-exec-ctrl --intent request -- \
           "BLOCKED: Implementer cannot complete phase '${phase}'.
 
 Reason: ${msg_text}
@@ -585,7 +585,7 @@ Options:
 
       # Wait for decision (same logic as escalation)
       while true; do
-        boss_msg=$(hcom listen --timeout 600 --json $name_arg 2>/dev/null) || continue
+        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || continue
         boss_text=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
@@ -616,7 +616,7 @@ except: print('')
           exit 1
         else
           # Forward guidance to implementer
-          hcom send "@${impl_name}" $name_arg --intent request -- \
+          hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
             "Bigboss guidance for blocked phase '${phase}': ${boss_text}
 
 Try again. When done: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null
@@ -636,7 +636,7 @@ echo "Plan: ${plan_abs}" >&2
 
 # Final summary to bigboss
 if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-  hcom send "@${caller_name}" $name_arg --intent inform -- \
+  hcom send "@${caller_name}" --name plan-exec-ctrl --intent inform -- \
     "PLAN EXECUTION COMPLETE: ${completed}/${total_phases} phases passed audit.
 Plan: ${plan_abs}
 All audited phases have independent PASS verification." 2>/dev/null
