@@ -215,7 +215,13 @@ hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: <phase_name>
 VERDICT: PASS|FAIL
 <requirement>: PASS|FAIL — <specific file:line evidence>'
 
-PARTIAL is NOT acceptable — either the requirement is fully met or it is FAIL.
+VERDICT RULES:
+- Use ONLY 'VERDICT: PASS' or 'VERDICT: FAIL'. Nothing else.
+- NEVER use 'PASS (with caveats)', 'PARTIAL', 'PASS*', or any qualified pass.
+- If ANY requirement is not fully met, the verdict is FAIL. Period.
+- Caveats, notes, and observations go in the per-requirement evidence, not the verdict.
+- The verdict is binary: every requirement met = PASS, anything else = FAIL.
+
 When you say PASS, include the specific evidence (file path, line numbers, what you verified).
 When you say FAIL, explain exactly what the plan requires vs what was actually built.
 
@@ -334,6 +340,8 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
 
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
+    # Quick check for already-queued messages first, then long wait
+    msg=$(hcom listen 2 --json --name plan-exec-ctrl 2>/dev/null) || \
     msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
       echo "  Timeout waiting for implementer (10 min). Nudging..." >&2
       hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
@@ -384,6 +392,8 @@ VERDICT: PASS|FAIL
 
       # Wait for audit result
       while true; do
+        # Quick check for already-queued messages first, then long wait
+        audit_msg=$(hcom listen 2 --json --name plan-exec-ctrl 2>/dev/null) || \
         audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
           echo "  Timeout waiting for auditor. Nudging..." >&2
           hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
@@ -410,7 +420,7 @@ except: print('')
         [[ "$audit_from" == "[hcom-events]" || -z "$audit_text" ]] && continue
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
-          if echo "$audit_text" | grep -q "VERDICT: PASS"; then
+          if echo "$audit_text" | grep -qP "^VERDICT: PASS\s*$"; then
             echo "  AUDIT PASSED" >&2
             completed=$((completed + 1))
             break 2
