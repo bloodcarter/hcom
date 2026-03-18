@@ -362,56 +362,40 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
 
   echo "  Assigned to implementer" >&2
 
-  # Wait for PHASE_DONE or PHASE_BLOCKED (poll events every 10s)
-  last_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
+  # Wait for PHASE_DONE or PHASE_BLOCKED using events --wait
   while true; do
-    sleep 10
-    # Check for new messages from implementer since last_seen_id
-    msg=$(hcom events --type message --from "$impl_name" --last 1 2>/dev/null | python3 -c "
-import sys, json
-line = sys.stdin.readline().strip()
-if not line: sys.exit(1)
-d = json.loads(line)
-eid = d.get('id', 0)
-if eid <= $last_seen_id: sys.exit(1)
-text = d.get('data',{}).get('text','')
-print(text)
-" 2>/dev/null) || continue
-    [[ -z "$msg" ]] && continue
-    msg_text="$msg"
-    # Update cursor
-    last_seen_id=$(hcom events --type message --from "$impl_name" --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "$last_seen_id")
+    msg_text=$(hcom events --wait 600 --type message --from "$impl_name" --sql "data LIKE '%PHASE_DONE%' OR data LIKE '%PHASE_BLOCKED%'" 2>/dev/null \
+      | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
+      echo "  Timeout (10 min). Nudging implementer..." >&2
+      hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- "Status check: report progress." 2>/dev/null || true
+      continue
+    }
+    [[ -z "$msg_text" ]] && continue
 
     # Check for PHASE_DONE
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
-      # Send audit request — use term inject for Codex (hcom send delivery unreliable)
-      audit_request="AUDIT REQUEST: ${phase}. Read plan at ${plan_abs}, extract requirements for this phase, read actual code, check SUBSTANCE. For each requirement: PASS or FAIL with file:line evidence. Report via: hcom send @bigboss --intent inform --name ${audit_name} -- 'AUDIT_RESULT: ${phase} VERDICT: PASS or FAIL ...requirements...'"
+      # Send audit request + wake up Codex
+      audit_request="AUDIT REQUEST: ${phase}. Read plan at ${plan_abs}, extract requirements for this phase, read actual code, check SUBSTANCE not just existence. For each requirement: PASS or FAIL with file:line evidence. Report via: hcom send @bigboss --intent inform --name ${audit_name} -- the full AUDIT_RESULT with VERDICT: PASS or FAIL"
+      hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
       if [[ "$audit_tool" == "codex" ]]; then
-        hcom term inject "$audit_name" "$audit_request" --enter 2>/dev/null || true
-      else
-        hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
+        sleep 2
+        hcom term inject "$audit_name" --enter 2>/dev/null || true
       fi
 
       echo "  Audit requested" >&2
 
-      # Wait for audit result (poll events every 10s)
-      audit_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
+      # Wait for audit result using events --wait
       while true; do
-        sleep 10
-        audit_text=$(hcom events --type message --from "$audit_name" --last 1 2>/dev/null | python3 -c "
-import sys, json
-line = sys.stdin.readline().strip()
-if not line: sys.exit(1)
-d = json.loads(line)
-eid = d.get('id', 0)
-if eid <= $audit_seen_id: sys.exit(1)
-text = d.get('data',{}).get('text','')
-print(text)
-" 2>/dev/null) || continue
+        audit_text=$(hcom events --wait 600 --type message --from "$audit_name" --sql "data LIKE '%AUDIT_RESULT%'" 2>/dev/null \
+          | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
+          echo "  Timeout waiting for auditor. Nudging..." >&2
+          hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "Report audit findings now." 2>/dev/null || true
+          [[ "$audit_tool" == "codex" ]] && hcom term inject "$audit_name" --enter 2>/dev/null || true
+          continue
+        }
         [[ -z "$audit_text" ]] && continue
-        audit_seen_id=$(hcom events --type message --from "$audit_name" --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "$audit_seen_id")
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
           if echo "$audit_text" | grep -qP "^VERDICT: PASS\s*$"; then
@@ -437,21 +421,13 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
 
               echo "  Waiting for bigboss decision..." >&2
 
-              boss_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
               while true; do
-                sleep 10
-                boss_text=$(hcom events --type message --last 1 2>/dev/null | python3 -c "
-import sys, json
-line = sys.stdin.readline().strip()
-if not line: sys.exit(1)
-d = json.loads(line)
-if d.get('id',0) <= $boss_seen_id: sys.exit(1)
-fr = d.get('data',{}).get('from','')
-if fr in ('[hcom-events]', '${ctrl_name}', '${impl_name}', '${audit_name}'): sys.exit(1)
-print(d.get('data',{}).get('text',''))
-" 2>/dev/null) || continue
-                [[ -z "\$boss_text" ]] && continue
-                boss_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "\$boss_seen_id")
+                boss_text=$(hcom events --wait 600 --type message --from bigboss 2>/dev/null \
+                  | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
+                  echo "  Still waiting for bigboss..." >&2
+                  continue
+                }
+                [[ -z "$boss_text" ]] && continue
 
                 if echo "$boss_text" | grep -iq "override\|proceed\|skip\|accept"; then
                   echo "  Bigboss: override — proceeding" >&2
@@ -502,17 +478,8 @@ When fixed, send a message containing 'PHASE_DONE: ${phase}' (to any agent or bi
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
       while true; do
-        sleep 10
-        boss_text=$(hcom events --type message --last 1 2>/dev/null | python3 -c "
-import sys, json
-line = sys.stdin.readline().strip()
-if not line: sys.exit(1)
-d = json.loads(line)
-if d.get('id',0) <= ${boss_seen_id:-0}: sys.exit(1)
-fr = d.get('data',{}).get('from','')
-if fr in ('[hcom-events]', '${ctrl_name}', '${impl_name}', '${audit_name}'): sys.exit(1)
-print(d.get('data',{}).get('text',''))
-" 2>/dev/null) || continue
+        boss_text=$(hcom events --wait 600 --type message --from bigboss 2>/dev/null \
+          | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
         [[ -z "$boss_text" ]] && continue
 
         if echo "$boss_text" | grep -iq "skip\|proceed\|override"; then
