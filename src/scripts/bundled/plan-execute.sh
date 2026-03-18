@@ -366,8 +366,7 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
     # Quick check for already-queued messages first, then long wait
-    msg=$(hcom listen 2 --json --name plan-exec-ctrl 2>/dev/null) || \
-    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
+    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
       echo "  Timeout waiting for implementer (10 min). Nudging..." >&2
       hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
         "Status check: are you still working on phase '${phase}'? Report progress." 2>/dev/null || true
@@ -418,8 +417,7 @@ VERDICT: PASS|FAIL
       # Wait for audit result
       while true; do
         # Quick check for already-queued messages first, then long wait
-        audit_msg=$(hcom listen 2 --json --name plan-exec-ctrl 2>/dev/null) || \
-        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
+        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
           echo "  Timeout waiting for auditor. Nudging..." >&2
           hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
             "Status check: audit for phase '${phase}' — please report your findings." 2>/dev/null || true
@@ -469,7 +467,7 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
               echo "  Waiting for bigboss decision..." >&2
 
               while true; do
-                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
+                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
                   echo "  Still waiting for bigboss..." >&2
                   continue
                 }
@@ -539,7 +537,7 @@ When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: 
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
       while true; do
-        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || continue
+        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || continue
         boss_text=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
