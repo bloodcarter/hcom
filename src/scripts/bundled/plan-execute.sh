@@ -127,8 +127,8 @@ batch_id="plan-exec-$(date +%s)"
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# --- Controller Identity (before launching agents) ---
-hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
+# No hcom start — use --name plan-exec-ctrl on all commands directly.
+# hcom start creates a collision subscription that generates TUI noise.
 
 trap cleanup ERR
 
