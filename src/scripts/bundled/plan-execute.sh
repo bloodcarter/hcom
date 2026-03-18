@@ -386,21 +386,13 @@ print(text)
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
-      # Send audit request
-      hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- \
-        "AUDIT REQUEST: ${phase}
-
-Read the plan file at ${plan_abs}. Extract the EXACT requirements for: ${phase}
-
-Then verify the SUBSTANCE of the implementation — read actual file contents, diff where the plan says 'copy', check that tests actually test the real code path (not mocks pretending to be E2E).
-
-For EACH requirement: PASS or FAIL with specific file:line evidence. PARTIAL = FAIL.
-
-Report:
-hcom send '@${ctrl_name}' --intent inform -- 'AUDIT_RESULT: ${phase}
-VERDICT: PASS|FAIL
-<requirement>: PASS|FAIL — <evidence>
-...'" 2>/dev/null || true
+      # Send audit request — use term inject for Codex (hcom send delivery unreliable)
+      audit_request="AUDIT REQUEST: ${phase}. Read plan at ${plan_abs}, extract requirements for this phase, read actual code, check SUBSTANCE. For each requirement: PASS or FAIL with file:line evidence. Report via: hcom send @bigboss --intent inform --name ${audit_name} -- 'AUDIT_RESULT: ${phase} VERDICT: PASS or FAIL ...requirements...'"
+      if [[ "$audit_tool" == "codex" ]]; then
+        hcom term inject "$audit_name" "$audit_request" --enter 2>/dev/null || true
+      else
+        hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
+      fi
 
       echo "  Audit requested" >&2
 
