@@ -167,34 +167,17 @@ Start by reading the plan file and waiting for your first phase assignment."
 impl_prompt="Read the plan file at ${plan_abs} and wait for your phase assignment via hcom."
 
 echo "Launching implementer (${impl_tool})..." >&2
-impl_launch_file=$(mktemp)
-hcom 1 "$impl_tool" --tag plan-impl \
+launch_out=$(hcom 1 "$impl_tool" --tag plan-impl \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
-  $dir_flag $impl_skip > "$impl_launch_file" 2>&1 &
-impl_launch_pid=$!
-
-# Wait for Names: to appear in output (up to 30s)
-impl_name=""
-for _i in $(seq 1 15); do
-  if grep -q '^Names: ' "$impl_launch_file" 2>/dev/null; then
-    impl_name=$(grep '^Names: ' "$impl_launch_file" | sed 's/^Names: //' | tr -d ' ')
-    break
-  fi
-  sleep 2
-done
-
-if [[ -z "$impl_name" ]]; then
-  echo "Error: Failed to launch implementer (no name after 30s)" >&2
-  cat "$impl_launch_file" >&2
-  kill $impl_launch_pid 2>/dev/null || true
-  rm -f "$impl_launch_file"
+  $dir_flag $impl_skip --headless 2>&1) || {
+  echo "Error: Failed to launch implementer" >&2
   exit 1
-fi
-rm -f "$impl_launch_file"
-LAUNCHED_NAMES+=("$impl_name")
+}
+track_launch "$launch_out"
 
+impl_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
 echo "  Implementer: $impl_name — waiting for ready..." >&2
 
 # Wait for implementer to be ready (up to 120s)
@@ -238,34 +221,17 @@ Wait for audit requests."
 audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure, then wait for audit requests via hcom."
 
 echo "Launching auditor (${audit_tool})..." >&2
-audit_launch_file=$(mktemp)
-hcom 1 "$audit_tool" --tag plan-audit \
+launch_out=$(hcom 1 "$audit_tool" --tag plan-audit \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
-  $dir_flag $audit_skip > "$audit_launch_file" 2>&1 &
-audit_launch_pid=$!
-
-# Wait for Names: to appear in output (up to 30s)
-audit_name=""
-for _i in $(seq 1 15); do
-  if grep -q '^Names: ' "$audit_launch_file" 2>/dev/null; then
-    audit_name=$(grep '^Names: ' "$audit_launch_file" | sed 's/^Names: //' | tr -d ' ')
-    break
-  fi
-  sleep 2
-done
-
-if [[ -z "$audit_name" ]]; then
-  echo "Error: Failed to launch auditor (no name after 30s)" >&2
-  cat "$audit_launch_file" >&2
-  kill $audit_launch_pid 2>/dev/null || true
-  rm -f "$audit_launch_file"
+  $dir_flag $audit_skip --headless 2>&1) || {
+  echo "Error: Failed to launch auditor" >&2
   exit 1
-fi
-rm -f "$audit_launch_file"
-LAUNCHED_NAMES+=("$audit_name")
+}
+track_launch "$launch_out"
 
+audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
 echo "  Auditor: $audit_name — waiting for ready..." >&2
 
 # Wait for auditor to be ready (up to 120s)
@@ -369,6 +335,19 @@ for i in "${!phases[@]}"; do
   echo "" >&2
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
 
+  # Ensure implementer is alive (headless agents exit after each task)
+  impl_status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+  if [[ "$impl_status" != "listening" && "$impl_status" != "active" ]]; then
+    echo "  Implementer inactive — resuming..." >&2
+    hcom r "$impl_name" --headless $impl_skip >/dev/null 2>&1 || true
+    for _i in $(seq 1 30); do
+      impl_status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+      [[ "$impl_status" == "listening" || "$impl_status" == "active" ]] && break
+      sleep 2
+    done
+    echo "  Implementer resumed" >&2
+  fi
+
   # Send phase assignment to implementer
   hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
     "PHASE ASSIGNMENT: ${phase}
@@ -431,6 +410,19 @@ except:
     # Check for PHASE_DONE from implementer
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
       echo "  Implementer reports phase done. Triggering audit..." >&2
+
+      # Ensure auditor is alive
+      audit_status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+      if [[ "$audit_status" != "listening" && "$audit_status" != "active" ]]; then
+        echo "  Auditor inactive — resuming..." >&2
+        hcom r "$audit_name" --headless $audit_skip >/dev/null 2>&1 || true
+        for _i in $(seq 1 30); do
+          audit_status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+          [[ "$audit_status" == "listening" || "$audit_status" == "active" ]] && break
+          sleep 2
+        done
+        echo "  Auditor resumed" >&2
+      fi
 
       # Send audit request to auditor
       hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
