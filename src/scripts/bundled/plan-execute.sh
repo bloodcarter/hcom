@@ -162,7 +162,7 @@ Start by reading the plan file and waiting for your first phase assignment."
 impl_prompt="Read the plan file at ${plan_abs} and wait for your phase assignment via hcom."
 
 echo "Launching implementer (${impl_tool})..." >&2
-launch_out=$(hcom 1 "$impl_tool" --tag plan-impl --go \
+launch_out=$(hcom 1 "$impl_tool" --tag plan-impl \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
@@ -173,7 +173,13 @@ launch_out=$(hcom 1 "$impl_tool" --tag plan-impl --go \
 track_launch "$launch_out"
 
 impl_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
-echo "  Implementer: $impl_name" >&2
+echo "  Implementer: $impl_name — waiting for ready..." >&2
+for _i in $(seq 1 60); do
+  status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+  [[ "$status" == "listening" || "$status" == "active" ]] && break
+  sleep 2
+done
+echo "  Implementer: $impl_name — ready" >&2
 
 # --- Launch Auditor ---
 
@@ -217,7 +223,7 @@ You are the last line of defense against convenience bias. Be thorough. Be liter
 audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
 
 echo "Launching auditor (${audit_tool})..." >&2
-launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
+launch_out=$(hcom 1 "$audit_tool" --tag plan-audit \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
@@ -228,7 +234,13 @@ launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
 track_launch "$launch_out"
 
 audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
-echo "  Auditor: $audit_name" >&2
+echo "  Auditor: $audit_name — waiting for ready..." >&2
+for _i in $(seq 1 60); do
+  status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
+  [[ "$status" == "listening" || "$status" == "active" ]] && break
+  sleep 2
+done
+echo "  Auditor: $audit_name — ready" >&2
 
 # Subscribe to idle events
 hcom events sub --idle "$impl_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
