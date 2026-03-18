@@ -39,7 +39,7 @@ Usage: hcom run plan-execute [OPTIONS]
 
 Execute an approved plan with independent compliance auditing.
 
-Spawns two agents:
+Spawns two agents in terminal windows:
   IMPLEMENTER: Builds each phase of the plan
   AUDITOR: Independently verifies each phase against the plan file
 
@@ -54,7 +54,6 @@ Options:
   --impl-tool TOOL        Override tool for implementer only
   --audit-tool TOOL       Override tool for auditor only
   --max-retries N         Max fix attempts per phase before escalating (default: 3)
-  --branch NAME           Git branch for implementation (default: auto-created)
   --dir PATH              Working directory (default: current)
   -h, --help              Show this help
 
@@ -74,7 +73,6 @@ impl_tool=""
 audit_tool=""
 max_retries=3
 start_phase=1
-branch=""
 work_dir=""
 
 while [[ $# -gt 0 ]]; do
@@ -87,7 +85,6 @@ while [[ $# -gt 0 ]]; do
     --impl-tool) impl_tool="$2"; shift 2 ;;
     --audit-tool) audit_tool="$2"; shift 2 ;;
     --max-retries) max_retries="$2"; shift 2 ;;
-    --branch) branch="$2"; shift 2 ;;
     --dir) work_dir="$2"; shift 2 ;;
     -*) echo "Error: unknown option: $1" >&2; exit 1 ;;
     *) echo "Error: unexpected argument: $1" >&2; exit 1 ;;
@@ -120,15 +117,6 @@ skip_perms_flag() {
 impl_skip=$(skip_perms_flag "$impl_tool")
 audit_skip=$(skip_perms_flag "$audit_tool")
 
-# Resolve caller
-name_arg=""
-[[ -n "$name_flag" ]] && name_arg="--name $name_flag"
-
-caller_name=""
-caller_json=$(hcom list self --json --name plan-exec-ctrl 2>/dev/null) && {
-  caller_name=$(echo "$caller_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])" 2>/dev/null)
-} || caller_name="bigboss"
-
 # Resolve absolute plan path
 plan_abs=$(realpath "$plan_path")
 
@@ -138,6 +126,9 @@ batch_id="plan-exec-$(date +%s)"
 # Dir flags
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
+
+# --- Controller Identity (before launching agents) ---
+hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
 
 trap cleanup ERR
 
@@ -150,6 +141,9 @@ YOUR JOB: Build each phase of the approved plan. You will receive one phase at a
 RULES:
 1. Read the plan file at: ${plan_abs}
 2. Implement EXACTLY what the plan says. Do not simplify, substitute, or skip requirements.
+   If the plan says 'copy verbatim', copy the file — do not rewrite it.
+   If the plan says 'Docker + real Electron', build Docker + real Electron — do not substitute Jest mocks.
+   If the plan says '~200 lines', aim for that — do not build a 1000-line reimplementation.
 3. When you finish a phase, report completion via hcom with EXACTLY this format:
    hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: <phase_name>'
 4. If the auditor rejects your work (FAIL), you will receive specific failures. Fix them and report again.
@@ -161,32 +155,25 @@ RULES:
 
 CRITICAL: When you report PHASE_DONE, the auditor will independently read the plan file and your code.
 They will check each requirement literally. PARTIAL = FAIL. Make sure every requirement is met before reporting.
+The auditor checks SUBSTANCE, not just existence — files must actually do what the plan says, not just exist.
 
 Start by reading the plan file and waiting for your first phase assignment."
 
 impl_prompt="Read the plan file at ${plan_abs} and wait for your phase assignment via hcom."
 
 echo "Launching implementer (${impl_tool})..." >&2
-launch_out=$(hcom 1 "$impl_tool" --tag plan-impl \
+launch_out=$(hcom 1 "$impl_tool" --tag plan-impl --go \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
-  $dir_flag $impl_skip --headless 2>&1) || {
+  $dir_flag $impl_skip 2>&1) || {
   echo "Error: Failed to launch implementer" >&2
   exit 1
 }
 track_launch "$launch_out"
 
 impl_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
-echo "  Implementer: $impl_name — waiting for ready..." >&2
-
-# Wait for implementer to be ready (up to 120s)
-for _i in $(seq 1 60); do
-  status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-  [[ "$status" == "listening" || "$status" == "active" ]] && break
-  sleep 2
-done
-echo "  Implementer ready" >&2
+echo "  Implementer: $impl_name" >&2
 
 # --- Launch Auditor ---
 
@@ -195,59 +182,55 @@ audit_system="You are the PLAN COMPLIANCE AUDITOR in a plan-execute workflow.
 YOUR JOB: Independently verify that each phase implementation matches the approved plan.
 You have VETO POWER. Your FAIL means the implementer must fix. Only bigboss can override you.
 
-RULES:
-1. The approved plan is at: ${plan_abs}
-2. You will receive audit requests with a phase name.
-3. For each audit:
-   a. Read the plan file — extract the EXACT requirements for that phase
-   b. Read the actual code/files that were created or modified (use git diff, file reads, etc.)
-   c. For EACH requirement: produce PASS or FAIL with specific evidence
-   d. PARTIAL is NOT acceptable — either the requirement is fully met or it is FAIL
-4. Report your findings via hcom with EXACTLY this format:
-   hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: <phase_name>
-   VERDICT: PASS|FAIL
-   <requirement 1>: PASS|FAIL — <evidence>
-   <requirement 2>: PASS|FAIL — <evidence>
-   ...'
-5. You do NOT evaluate code quality, style, or architecture. Only plan compliance.
-6. You read the plan DIRECTLY. You never rely on the implementer's summary of what the plan says.
-7. Be literal. If the plan says 'Docker', a Jest mock is FAIL even if it's well-written.
+CRITICAL AUDIT METHODOLOGY — check SUBSTANCE, not just existence:
 
-You are the structural check against convenience bias and incremental drift.
-Your independence is the reason this workflow is trustworthy.
+For EVERY requirement, you must verify the ACTUAL BEHAVIOR, not just that a file exists:
 
-Wait for audit requests."
+- 'Copy verbatim' means diff the files — if the content differs materially, it's FAIL (not 'rewritten')
+- 'Run real Electron app in Docker' means the test ACTUALLY launches Electron inside a Docker container.
+  If you find Jest tests with mock providers or a headless Node.js script, that is FAIL even if the file
+  is named 'e2e' and lives in a Docker directory.
+- 'Feed real audio via PulseAudio' means actual PulseAudio virtual mic setup. No audio = FAIL.
+- '~200 lines' is a guideline, not exact — but if the plan says ~200 and you find 1000, investigate why.
+- 'No repair loops' means grep for retry/repair patterns — verify their absence, don't trust filenames.
+- 'Record fixtures from manual sessions' means the fixtures were captured from real LLM calls, not hand-written.
 
-audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure, then wait for audit requests via hcom."
+HOW TO AUDIT each requirement:
+1. Read the plan file at ${plan_abs} — extract the EXACT words used for this phase
+2. Read the actual code — not just filenames but the CONTENT of the files
+3. For 'copy' requirements: diff the v1 and v2 files
+4. For 'build X' requirements: read the file, verify it does what the plan describes
+5. For testing requirements: read the test code and verify it tests the REAL code path, not a mock/stub
+6. For 'wire into X' requirements: trace the actual integration point
+
+REPORT FORMAT — use EXACTLY this:
+hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: <phase_name>
+VERDICT: PASS|FAIL
+<requirement>: PASS|FAIL — <specific file:line evidence>'
+
+PARTIAL is NOT acceptable — either the requirement is fully met or it is FAIL.
+When you say PASS, include the specific evidence (file path, line numbers, what you verified).
+When you say FAIL, explain exactly what the plan requires vs what was actually built.
+
+You are the last line of defense against convenience bias. Be thorough. Be literal. Be skeptical."
+
+audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
 
 echo "Launching auditor (${audit_tool})..." >&2
-launch_out=$(hcom 1 "$audit_tool" --tag plan-audit \
+launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
-  $dir_flag $audit_skip --headless 2>&1) || {
+  $dir_flag $audit_skip 2>&1) || {
   echo "Error: Failed to launch auditor" >&2
   exit 1
 }
 track_launch "$launch_out"
 
 audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
-echo "  Auditor: $audit_name — waiting for ready..." >&2
+echo "  Auditor: $audit_name" >&2
 
-# Wait for auditor to be ready (up to 120s)
-for _i in $(seq 1 60); do
-  status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-  [[ "$status" == "listening" || "$status" == "active" ]] && break
-  sleep 2
-done
-echo "  Auditor ready" >&2
-
-# --- Controller Identity ---
-
-# Start controller identity for message routing
-hcom start --as plan-exec-ctrl >/dev/null 2>&1 || true
-
-# Subscribe to messages from both agents
+# Subscribe to idle events
 hcom events sub --idle "$impl_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
 hcom events sub --idle "$audit_name" --name plan-exec-ctrl >/dev/null 2>&1 || true
 
@@ -256,8 +239,6 @@ trap - ERR
 
 # --- Phase Extraction ---
 
-# Extract phase/section names from the plan file
-# Looks for ## headers or numbered sections
 extract_phases() {
   local plan="$1"
   python3 -c "
@@ -266,22 +247,17 @@ import re, sys
 with open('$plan') as f:
     content = f.read()
 
-# Find phase/step/section headers at any heading depth (##, ###, ####)
-# Matches: '## Phase 1: Foundation (3 days)', '### Step 2 — Voice Pipeline', etc.
 phases = []
-for m in re.finditer(r'^#{2,4}\s+(Phase\s+\d+|Step\s+\d+|Stage\s+\d+)[:\s—–-]*(.*)', content, re.MULTILINE | re.IGNORECASE):
+for m in re.finditer(r'^#{2,4}\s+(Phase\s+\d+|Step\s+\d+|Stage\s+\d+)[:\s\xc2\xa0\xe2\x80\x94\xe2\x80\x93-]*(.*)', content, re.MULTILINE | re.IGNORECASE):
     name = m.group(1).strip()
-    desc = m.group(2).strip(' :—–-')
-    # Remove trailing parenthetical like '(3 days)'
+    desc = m.group(2).strip(' :\xe2\x80\x94\xe2\x80\x93-')
     desc = re.sub(r'\s*\(\d+\s+days?\)\s*$', '', desc).strip()
     phases.append(f'{name}: {desc}' if desc else name)
 
-# If no Phase/Step headers, try numbered top-level items
 if not phases:
     for m in re.finditer(r'^#+\s+(\d+[\.\)]\s+.+)', content, re.MULTILINE):
         phases.append(m.group(1).strip())
 
-# If still nothing, use all ## headers
 if not phases:
     for m in re.finditer(r'^##\s+(.+)', content, re.MULTILINE):
         phases.append(m.group(1).strip())
@@ -335,19 +311,6 @@ for i in "${!phases[@]}"; do
   echo "" >&2
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
 
-  # Ensure implementer is alive (headless agents exit after each task)
-  impl_status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-  if [[ "$impl_status" != "listening" && "$impl_status" != "active" ]]; then
-    echo "  Implementer inactive — resuming..." >&2
-    hcom r "$impl_name" --headless $impl_skip >/dev/null 2>&1 || true
-    for _i in $(seq 1 30); do
-      impl_status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-      [[ "$impl_status" == "listening" || "$impl_status" == "active" ]] && break
-      sleep 2
-    done
-    echo "  Implementer resumed" >&2
-  fi
-
   # Send phase assignment to implementer
   hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
     "PHASE ASSIGNMENT: ${phase}
@@ -364,90 +327,60 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
 
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
-    # Listen for messages (controller waits here)
-    msg=$(hcom listen --timeout 300 --json --name plan-exec-ctrl 2>/dev/null) || {
-      echo "  Timeout waiting for implementer (5 min). Nudging..." >&2
+    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
+      echo "  Timeout waiting for implementer (10 min). Nudging..." >&2
       hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
-        "Status check: are you still working on phase '${phase}'? Report progress." 2>/dev/null
+        "Status check: are you still working on phase '${phase}'? Report progress." 2>/dev/null || true
       continue
     }
 
-    # Parse the message
     msg_text=$(echo "$msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    # Handle both direct message and event wrapper formats
-    if 'text' in d:
-        print(d['text'])
-    elif 'data' in d and 'text' in d['data']:
-        print(d['data']['text'])
-    else:
-        print('')
-except:
-    print('')
+    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
+except: print('')
 " 2>/dev/null)
 
     msg_from=$(echo "$msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'from' in d:
-        print(d['from'])
-    elif 'data' in d and 'from' in d['data']:
-        print(d['data']['from'])
-    else:
-        print('')
-except:
-    print('')
+    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
+except: print('')
 " 2>/dev/null)
 
     # Skip event notifications and system messages
-    if [[ "$msg_from" == "[hcom-events]" ]] || [[ -z "$msg_text" ]]; then
-      continue
-    fi
+    [[ "$msg_from" == "[hcom-events]" || -z "$msg_text" ]] && continue
 
-    # Check for PHASE_DONE from implementer
+    # Check for PHASE_DONE
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
       echo "  Implementer reports phase done. Triggering audit..." >&2
 
-      # Ensure auditor is alive
-      audit_status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-      if [[ "$audit_status" != "listening" && "$audit_status" != "active" ]]; then
-        echo "  Auditor inactive — resuming..." >&2
-        hcom r "$audit_name" --headless $audit_skip >/dev/null 2>&1 || true
-        for _i in $(seq 1 30); do
-          audit_status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
-          [[ "$audit_status" == "listening" || "$audit_status" == "active" ]] && break
-          sleep 2
-        done
-        echo "  Auditor resumed" >&2
-      fi
-
-      # Send audit request to auditor
+      # Send audit request
       hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
         "AUDIT REQUEST: ${phase}
 
 Read the plan file at ${plan_abs}. Extract the EXACT requirements for: ${phase}
 
-Read the actual code changes (git diff, read files, check what was built).
+Then verify the SUBSTANCE of the implementation — read actual file contents, diff where the plan says 'copy', check that tests actually test the real code path (not mocks pretending to be E2E).
 
-For EACH requirement: PASS or FAIL with specific evidence. PARTIAL = FAIL.
+For EACH requirement: PASS or FAIL with specific file:line evidence. PARTIAL = FAIL.
 
-Report format:
+Report:
 hcom send '@plan-exec-ctrl' --intent inform -- 'AUDIT_RESULT: ${phase}
 VERDICT: PASS|FAIL
 <requirement>: PASS|FAIL — <evidence>
-...'" 2>/dev/null
+...'" 2>/dev/null || true
 
       echo "  Audit requested" >&2
 
       # Wait for audit result
       while true; do
-        audit_msg=$(hcom listen --timeout 300 --json --name plan-exec-ctrl 2>/dev/null) || {
+        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
           echo "  Timeout waiting for auditor. Nudging..." >&2
           hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
-            "Status check: audit for phase '${phase}' — please report your findings." 2>/dev/null
+            "Status check: audit for phase '${phase}' — please report your findings." 2>/dev/null || true
           continue
         }
 
@@ -455,40 +388,25 @@ VERDICT: PASS|FAIL
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'text' in d:
-        print(d['text'])
-    elif 'data' in d and 'text' in d['data']:
-        print(d['data']['text'])
-    else:
-        print('')
-except:
-    print('')
+    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
+except: print('')
 " 2>/dev/null)
 
         audit_from=$(echo "$audit_msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'from' in d:
-        print(d['from'])
-    elif 'data' in d and 'from' in d['data']:
-        print(d['data']['from'])
-    else:
-        print('')
-except:
-    print('')
+    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
+except: print('')
 " 2>/dev/null)
 
-        # Skip non-audit messages
-        if [[ "$audit_from" == "[hcom-events]" ]] || [[ -z "$audit_text" ]]; then
-          continue
-        fi
+        [[ "$audit_from" == "[hcom-events]" || -z "$audit_text" ]] && continue
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
           if echo "$audit_text" | grep -q "VERDICT: PASS"; then
             echo "  AUDIT PASSED" >&2
             completed=$((completed + 1))
-            break 2  # Break both inner loops, continue to next phase
+            break 2
           else
             retries=$((retries + 1))
             echo "  AUDIT FAILED (attempt ${retries}/${max_retries})" >&2
@@ -498,77 +416,57 @@ except:
               echo "  MAX RETRIES REACHED for phase: ${phase}" >&2
               echo "  Escalating to bigboss..." >&2
 
-              # Notify bigboss
-              if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-                hcom send "@${caller_name}" --name plan-exec-ctrl --intent request -- \
-                  "ESCALATION: Phase '${phase}' failed audit ${max_retries} times.
+              hcom send "@bigboss" --name plan-exec-ctrl --intent request -- \
+                "ESCALATION: Phase '${phase}' failed audit ${max_retries} times.
 
 Last audit result:
 ${audit_text}
 
-Options:
-1. Allow another retry cycle
-2. Override auditor FAIL and proceed
-3. Modify the plan requirements
-4. Abort plan execution
-
-Respond with your decision." 2>/dev/null
-              fi
+Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
 
               echo "  Waiting for bigboss decision..." >&2
 
-              # Wait for bigboss decision
               while true; do
                 boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
-                  echo "  Still waiting for bigboss (10 min timeout)..." >&2
+                  echo "  Still waiting for bigboss..." >&2
                   continue
                 }
                 boss_text=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'text' in d: print(d['text'])
-    elif 'data' in d and 'text' in d['data']: print(d['data']['text'])
-    else: print('')
+    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
 except: print('')
 " 2>/dev/null)
                 boss_from=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'from' in d: print(d['from'])
-    elif 'data' in d and 'from' in d['data']: print(d['data']['from'])
-    else: print('')
+    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
 except: print('')
 " 2>/dev/null)
 
-                if [[ "$boss_from" == "[hcom-events]" ]] || [[ -z "$boss_text" ]]; then
-                  continue
-                fi
+                [[ "$boss_from" == "[hcom-events]" || -z "$boss_text" ]] && continue
 
-                # Process bigboss decision
                 if echo "$boss_text" | grep -iq "override\|proceed\|skip\|accept"; then
-                  echo "  Bigboss: override — proceeding to next phase" >&2
+                  echo "  Bigboss: override — proceeding" >&2
                   completed=$((completed + 1))
-                  break 3  # Break all loops, next phase
+                  break 3
                 elif echo "$boss_text" | grep -iq "retry\|again\|continue"; then
-                  echo "  Bigboss: retry — resetting retry counter" >&2
+                  echo "  Bigboss: retry" >&2
                   retries=0
-                  break  # Break boss loop, send failures to implementer
+                  break
                 elif echo "$boss_text" | grep -iq "abort\|stop\|cancel"; then
                   echo "  Bigboss: abort" >&2
-                  echo "" >&2
                   echo "=== PLAN EXECUTION ABORTED ===" >&2
                   echo "Completed: ${completed}/${total_phases} phases" >&2
                   cleanup
                   exit 1
-                else
-                  echo "  Unrecognized decision. Reply with: retry, override, or abort" >&2
                 fi
               done
             fi
 
-            # Send failures to implementer for fixing
+            # Send failures to implementer
             hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
               "AUDIT FAILED for phase: ${phase} (attempt ${retries}/${max_retries})
 
@@ -578,75 +476,54 @@ ${audit_text}
 Fix ALL FAIL items. Each requirement must be met LITERALLY as stated in the plan.
 Do not substitute alternatives. If you cannot meet a requirement, report PHASE_BLOCKED.
 
-When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null
+When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
 
-            echo "  Sent failures to implementer for fixing" >&2
-            break  # Break audit loop, wait for next PHASE_DONE
+            echo "  Sent failures to implementer" >&2
+            break  # Back to waiting for PHASE_DONE
           fi
         fi
       done
-      # Continue waiting for implementer's fix (outer while loop)
       continue
     fi
 
-    # Check for PHASE_BLOCKED from implementer
+    # Check for PHASE_BLOCKED
     if echo "$msg_text" | grep -q "PHASE_BLOCKED"; then
-      echo "" >&2
       echo "  PHASE BLOCKED: ${phase}" >&2
-      echo "  Reason: ${msg_text}" >&2
-      echo "  Escalating to bigboss..." >&2
+      echo "  ${msg_text}" >&2
 
-      if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-        hcom send "@${caller_name}" --name plan-exec-ctrl --intent request -- \
-          "BLOCKED: Implementer cannot complete phase '${phase}'.
+      hcom send "@bigboss" --name plan-exec-ctrl --intent request -- \
+        "BLOCKED: Phase '${phase}' — ${msg_text}
 
-Reason: ${msg_text}
+Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
-Options:
-1. Provide guidance and retry
-2. Modify the plan
-3. Skip this phase
-4. Abort" 2>/dev/null
-      fi
-
-      # Wait for decision (same logic as escalation)
       while true; do
         boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || continue
         boss_text=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'text' in d: print(d['text'])
-    elif 'data' in d and 'text' in d['data']: print(d['data']['text'])
-    else: print('')
+    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
 except: print('')
 " 2>/dev/null)
         boss_from=$(echo "$boss_msg" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    if 'from' in d: print(d['from'])
-    elif 'data' in d and 'from' in d['data']: print(d['data']['from'])
-    else: print('')
+    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
 except: print('')
 " 2>/dev/null)
-        if [[ "$boss_from" == "[hcom-events]" ]] || [[ -z "$boss_text" ]]; then
-          continue
-        fi
+        [[ "$boss_from" == "[hcom-events]" || -z "$boss_text" ]] && continue
+
         if echo "$boss_text" | grep -iq "skip\|proceed\|override"; then
-          echo "  Bigboss: skip phase" >&2
           break 2
         elif echo "$boss_text" | grep -iq "abort\|stop\|cancel"; then
-          echo "  Bigboss: abort" >&2
-          cleanup
-          exit 1
+          cleanup; exit 1
         else
-          # Forward guidance to implementer
           hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
-            "Bigboss guidance for blocked phase '${phase}': ${boss_text}
+            "Bigboss guidance: ${boss_text}
 
-Try again. When done: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null
-          break  # Back to waiting for PHASE_DONE
+Try again. Report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
+          break
         fi
       done
     fi
@@ -660,18 +537,14 @@ echo "=== PLAN EXECUTION COMPLETE ===" >&2
 echo "Completed: ${completed}/${total_phases} phases (${skipped} skipped)" >&2
 echo "Plan: ${plan_abs}" >&2
 
-# Final summary to bigboss
-if [[ -n "$caller_name" && "$caller_name" != "bigboss" ]]; then
-  hcom send "@${caller_name}" --name plan-exec-ctrl --intent inform -- \
-    "PLAN EXECUTION COMPLETE: ${completed}/${total_phases} phases passed audit.
+hcom send "@bigboss" --name plan-exec-ctrl --intent inform -- \
+  "PLAN EXECUTION COMPLETE: ${completed}/${total_phases} phases passed audit.
 Plan: ${plan_abs}
-All audited phases have independent PASS verification." 2>/dev/null
-fi
+All audited phases have independent PASS verification." 2>/dev/null || true
 
-# Cleanup agents
+# Cleanup
 echo "Stopping agents..." >&2
 for name in "${LAUNCHED_NAMES[@]}"; do
   hcom stop "$name" --go 2>/dev/null || true
 done
-
 echo "Done." >&2
