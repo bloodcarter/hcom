@@ -245,11 +245,11 @@ echo "  Auditor ready" >&2
 # --- Controller Identity ---
 
 # Start controller identity for message routing
-hcom start --as plan-exec-ctrl $name_arg 2>/dev/null || true
+hcom start --as plan-exec-ctrl $name_arg >/dev/null 2>/dev/null || true
 
 # Subscribe to messages from both agents
-hcom events sub --idle "$impl_name" $name_arg 2>/dev/null || true
-hcom events sub --idle "$audit_name" $name_arg 2>/dev/null || true
+hcom events sub --idle "$impl_name" $name_arg >/dev/null 2>/dev/null || true
+hcom events sub --idle "$audit_name" $name_arg >/dev/null 2>/dev/null || true
 
 # Clear trap (successful launch)
 trap - ERR
