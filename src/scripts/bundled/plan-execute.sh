@@ -171,7 +171,7 @@ launch_out=$(hcom 1 "$impl_tool" --tag plan-impl \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$impl_system" \
   --hcom-prompt "$impl_prompt" \
-  $dir_flag $impl_skip 2>&1) || {
+  $dir_flag $impl_skip --headless 2>&1) || {
   echo "Error: Failed to launch implementer" >&2
   exit 1
 }
@@ -180,8 +180,8 @@ track_launch "$launch_out"
 impl_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
 echo "  Implementer: $impl_name — waiting for ready..." >&2
 
-# Wait for implementer to be ready (up to 60s)
-for _i in $(seq 1 30); do
+# Wait for implementer to be ready (up to 120s)
+for _i in $(seq 1 60); do
   status=$(hcom list "$impl_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
   [[ "$status" == "listening" || "$status" == "active" ]] && break
   sleep 2
@@ -225,7 +225,7 @@ launch_out=$(hcom 1 "$audit_tool" --tag plan-audit \
   --batch-id "$batch_id" \
   --hcom-system-prompt "$audit_system" \
   --hcom-prompt "$audit_prompt" \
-  $dir_flag $audit_skip 2>&1) || {
+  $dir_flag $audit_skip --headless 2>&1) || {
   echo "Error: Failed to launch auditor" >&2
   exit 1
 }
@@ -234,8 +234,8 @@ track_launch "$launch_out"
 audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
 echo "  Auditor: $audit_name — waiting for ready..." >&2
 
-# Wait for auditor to be ready (up to 60s)
-for _i in $(seq 1 30); do
+# Wait for auditor to be ready (up to 120s)
+for _i in $(seq 1 60); do
   status=$(hcom list "$audit_name" --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null) || true
   [[ "$status" == "listening" || "$status" == "active" ]] && break
   sleep 2
