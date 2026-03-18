@@ -110,7 +110,7 @@ fi
 skip_perms_flag() {
   case "$1" in
     claude) echo "--dangerously-skip-permissions" ;;
-    codex)  echo "--dangerously-bypass-approvals-and-sandbox" ;;
+    codex)  echo "--full-auto" ;;
     *)      echo "" ;;
   esac
 }
