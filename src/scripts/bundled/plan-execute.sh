@@ -227,13 +227,26 @@ When you say FAIL, explain exactly what the plan requires vs what was actually b
 
 You are the last line of defense against convenience bias. Be thorough. Be literal. Be skeptical."
 
-audit_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
+# For Codex: system prompt via developer_instructions is too long and causes exit code 2.
+# Instead, send the full role instructions as the initial prompt.
+if [[ "$audit_tool" == "codex" ]]; then
+  audit_launch_system=""
+  audit_launch_prompt="${audit_system}
+
+---
+START NOW: Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
+else
+  audit_launch_system="$audit_system"
+  audit_launch_prompt="Read the plan file at ${plan_abs} to familiarize yourself with its structure and specific requirements. Note any requirements that need careful substantive verification (e.g., 'copy verbatim', 'real E2E in Docker', 'no repair loops'). Then wait for audit requests via hcom."
+fi
 
 echo "Launching auditor (${audit_tool})..." >&2
+audit_sys_flag=""
+[[ -n "$audit_launch_system" ]] && audit_sys_flag="--hcom-system-prompt"
 launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
   --batch-id "$batch_id" \
-  --hcom-system-prompt "$audit_system" \
-  --hcom-prompt "$audit_prompt" \
+  ${audit_launch_system:+--hcom-system-prompt "$audit_launch_system"} \
+  --hcom-prompt "$audit_launch_prompt" \
   $dir_flag $audit_skip 2>&1) || {
   echo "Error: Failed to launch auditor" >&2
   exit 1
