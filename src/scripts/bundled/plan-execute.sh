@@ -364,13 +364,12 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
 
   # Wait for PHASE_DONE or PHASE_BLOCKED
   while true; do
-    # Quick check for already-queued messages first, then long wait
-    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
-      echo "  Timeout waiting for implementer (10 min). Nudging..." >&2
-      hcom send "@${impl_name}" --name plan-exec-ctrl --intent request -- \
-        "Status check: are you still working on phase '${phase}'? Report progress." 2>/dev/null || true
+    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null)
+    # Empty or failed listen — sleep to avoid tight loop, then retry
+    if [[ -z "$msg" ]]; then
+      sleep 5
       continue
-    }
+    fi
 
     msg_text=$(echo "$msg" | python3 -c "
 import sys, json
@@ -415,13 +414,11 @@ VERDICT: PASS|FAIL
 
       # Wait for audit result
       while true; do
-        # Quick check for already-queued messages first, then long wait
-        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null) || {
-          echo "  Timeout waiting for auditor. Nudging..." >&2
-          hcom send "@${audit_name}" --name plan-exec-ctrl --intent request -- \
-            "Status check: audit for phase '${phase}' — please report your findings." 2>/dev/null || true
+        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl --type message 2>/dev/null)
+        if [[ -z "$audit_msg" ]]; then
+          sleep 5
           continue
-        }
+        fi
 
         audit_text=$(echo "$audit_msg" | python3 -c "
 import sys, json
