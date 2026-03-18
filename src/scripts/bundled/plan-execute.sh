@@ -110,7 +110,7 @@ fi
 skip_perms_flag() {
   case "$1" in
     claude) echo "--dangerously-skip-permissions" ;;
-    codex)  echo "--full-auto" ;;
+    codex)  echo "" ;;  # hcom sets --full-auto for codex by default
     *)      echo "" ;;
   esac
 }
