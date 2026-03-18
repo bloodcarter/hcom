@@ -241,16 +241,24 @@ else
 fi
 
 echo "Launching auditor (${audit_tool})..." >&2
-audit_sys_flag=""
-[[ -n "$audit_launch_system" ]] && audit_sys_flag="--hcom-system-prompt"
-launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
-  --batch-id "$batch_id" \
-  ${audit_launch_system:+--hcom-system-prompt "$audit_launch_system"} \
-  --hcom-prompt "$audit_launch_prompt" \
-  $dir_flag $audit_skip 2>&1) || {
-  echo "Error: Failed to launch auditor" >&2
-  exit 1
-}
+if [[ -n "$audit_launch_system" ]]; then
+  launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
+    --batch-id "$batch_id" \
+    --hcom-system-prompt "$audit_launch_system" \
+    --hcom-prompt "$audit_launch_prompt" \
+    $dir_flag $audit_skip 2>&1) || {
+    echo "Error: Failed to launch auditor" >&2
+    exit 1
+  }
+else
+  launch_out=$(hcom 1 "$audit_tool" --tag plan-audit --go \
+    --batch-id "$batch_id" \
+    --hcom-prompt "$audit_launch_prompt" \
+    $dir_flag $audit_skip 2>&1) || {
+    echo "Error: Failed to launch auditor" >&2
+    exit 1
+  }
+fi
 track_launch "$launch_out"
 
 audit_name=$(echo "$launch_out" | grep '^Names: ' | sed 's/^Names: //' | tr -d ' ')
