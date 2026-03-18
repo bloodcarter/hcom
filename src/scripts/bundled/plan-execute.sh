@@ -127,13 +127,9 @@ batch_id="plan-exec-$(date +%s)"
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# Register controller identity (needed for --name on send/events)
+# Register controller identity (visible in TUI)
 ctrl_name="pexc"
 hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
-# Remove the auto-created collision subscription to eliminate TUI noise
-sleep 1
-collision_sub=$(hcom events sub list 2>/dev/null | grep "$ctrl_name" | grep collision | awk '{print $1}')
-[[ -n "$collision_sub" ]] && hcom events unsub "$collision_sub" --name "$ctrl_name" >/dev/null 2>&1 || true
 
 trap cleanup ERR
 
