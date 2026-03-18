@@ -364,33 +364,25 @@ If you cannot meet a requirement, report PHASE_BLOCKED with the specific require
 
   echo "  Assigned to implementer" >&2
 
-  # Wait for PHASE_DONE or PHASE_BLOCKED
+  # Wait for PHASE_DONE or PHASE_BLOCKED (poll events every 10s)
+  last_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
   while true; do
-    msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null)
-    # Empty or failed listen — sleep to avoid tight loop, then retry
-    if [[ -z "$msg" ]]; then
-      sleep 5
-      continue
-    fi
-
-    msg_text=$(echo "$msg" | python3 -c "
+    sleep 10
+    # Check for new messages from implementer since last_seen_id
+    msg=$(hcom events --type message --from "$impl_name" --last 1 2>/dev/null | python3 -c "
 import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
-except: print('')
-" 2>/dev/null)
-
-    msg_from=$(echo "$msg" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
-except: print('')
-" 2>/dev/null)
-
-    # Skip event notifications, system messages, and our own messages
-    [[ "$msg_from" == "[hcom-events]" || "$msg_from" == "plan-exec-ctrl" || -z "$msg_text" ]] && continue
+line = sys.stdin.readline().strip()
+if not line: sys.exit(1)
+d = json.loads(line)
+eid = d.get('id', 0)
+if eid <= $last_seen_id: sys.exit(1)
+text = d.get('data',{}).get('text','')
+print(text)
+" 2>/dev/null) || continue
+    [[ -z "$msg" ]] && continue
+    msg_text="$msg"
+    # Update cursor
+    last_seen_id=$(hcom events --type message --from "$impl_name" --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "$last_seen_id")
 
     # Check for PHASE_DONE
     if echo "$msg_text" | grep -q "PHASE_DONE"; then
@@ -414,33 +406,22 @@ VERDICT: PASS|FAIL
 
       echo "  Audit requested" >&2
 
-      # Wait for audit result
+      # Wait for audit result (poll events every 10s)
+      audit_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
       while true; do
-        audit_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null)
-        if [[ -z "$audit_msg" ]]; then
-          sleep 5
-          continue
-        fi
-
-        audit_text=$(echo "$audit_msg" | python3 -c "
+        sleep 10
+        audit_text=$(hcom events --type message --from "$audit_name" --last 1 2>/dev/null | python3 -c "
 import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
-except: print('')
-" 2>/dev/null)
-
-        audit_from=$(echo "$audit_msg" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
-except: print('')
-" 2>/dev/null)
-
-        # Only process messages from the auditor — skip our own and implementer's
-        [[ "$audit_from" == "[hcom-events]" || "$audit_from" == "plan-exec-ctrl" || -z "$audit_text" ]] && continue
-        [[ "$audit_from" != "$audit_name" ]] && continue
+line = sys.stdin.readline().strip()
+if not line: sys.exit(1)
+d = json.loads(line)
+eid = d.get('id', 0)
+if eid <= $audit_seen_id: sys.exit(1)
+text = d.get('data',{}).get('text','')
+print(text)
+" 2>/dev/null) || continue
+        [[ -z "$audit_text" ]] && continue
+        audit_seen_id=$(hcom events --type message --from "$audit_name" --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "$audit_seen_id")
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
           if echo "$audit_text" | grep -qP "^VERDICT: PASS\s*$"; then
@@ -466,27 +447,21 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
 
               echo "  Waiting for bigboss decision..." >&2
 
+              boss_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "0")
               while true; do
-                boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || {
-                  echo "  Still waiting for bigboss..." >&2
-                  continue
-                }
-                boss_text=$(echo "$boss_msg" | python3 -c "
+                sleep 10
+                boss_text=$(hcom events --type message --last 1 2>/dev/null | python3 -c "
 import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
-except: print('')
-" 2>/dev/null)
-                boss_from=$(echo "$boss_msg" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
-except: print('')
-" 2>/dev/null)
-
-                [[ "$boss_from" == "[hcom-events]" || -z "$boss_text" ]] && continue
+line = sys.stdin.readline().strip()
+if not line: sys.exit(1)
+d = json.loads(line)
+if d.get('id',0) <= $boss_seen_id: sys.exit(1)
+fr = d.get('data',{}).get('from','')
+if fr in ('[hcom-events]', 'plan-exec-ctrl', '$impl_name', '$audit_name'): sys.exit(1)
+print(d.get('data',{}).get('text',''))
+" 2>/dev/null) || continue
+                [[ -z "\$boss_text" ]] && continue
+                boss_seen_id=$(hcom events --last 1 2>/dev/null | python3 -c "import sys,json; print(json.loads(sys.stdin.readline().strip()).get('id',0))" 2>/dev/null || echo "\$boss_seen_id")
 
                 if echo "$boss_text" | grep -iq "override\|proceed\|skip\|accept"; then
                   echo "  Bigboss: override — proceeding" >&2
@@ -537,22 +512,18 @@ When fixed, report: hcom send '@plan-exec-ctrl' --intent inform -- 'PHASE_DONE: 
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
       while true; do
-        boss_msg=$(hcom listen --timeout 600 --json --name plan-exec-ctrl 2>/dev/null) || continue
-        boss_text=$(echo "$boss_msg" | python3 -c "
+        sleep 10
+        boss_text=$(hcom events --type message --last 1 2>/dev/null | python3 -c "
 import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('text', '') or (d.get('data', {}).get('text', '')))
-except: print('')
-" 2>/dev/null)
-        boss_from=$(echo "$boss_msg" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('from', '') or (d.get('data', {}).get('from', '')))
-except: print('')
-" 2>/dev/null)
-        [[ "$boss_from" == "[hcom-events]" || -z "$boss_text" ]] && continue
+line = sys.stdin.readline().strip()
+if not line: sys.exit(1)
+d = json.loads(line)
+if d.get('id',0) <= ${boss_seen_id:-0}: sys.exit(1)
+fr = d.get('data',{}).get('from','')
+if fr in ('[hcom-events]', 'plan-exec-ctrl', '$impl_name', '$audit_name'): sys.exit(1)
+print(d.get('data',{}).get('text',''))
+" 2>/dev/null) || continue
+        [[ -z "$boss_text" ]] && continue
 
         if echo "$boss_text" | grep -iq "skip\|proceed\|override"; then
           break 2
