@@ -362,14 +362,12 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
 
   echo "  Assigned to implementer" >&2
 
-  # Wait for PHASE_DONE or PHASE_BLOCKED using events --wait
+  # Wait for PHASE_DONE or PHASE_BLOCKED (poll events every 15s)
+  phase_start_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   while true; do
-    msg_text=$(hcom events --wait 600 --type message --from "$impl_name" --sql "data LIKE '%PHASE_DONE%' OR data LIKE '%PHASE_BLOCKED%'" 2>/dev/null \
-      | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
-      echo "  Timeout (10 min). Nudging implementer..." >&2
-      hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- "Status check: report progress." 2>/dev/null || true
-      continue
-    }
+    sleep 15
+    msg_text=$(hcom events --type message --from "$impl_name" --after "$phase_start_ts" --sql "data LIKE '%PHASE_DONE%' OR data LIKE '%PHASE_BLOCKED%'" --last 1 2>/dev/null \
+      | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
     [[ -z "$msg_text" ]] && continue
 
     # Check for PHASE_DONE
@@ -386,15 +384,12 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
 
       echo "  Audit requested" >&2
 
-      # Wait for audit result using events --wait
+      # Wait for audit result (poll events every 15s)
+      audit_start_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
       while true; do
-        audit_text=$(hcom events --wait 600 --type message --from "$audit_name" --sql "data LIKE '%AUDIT_RESULT%'" 2>/dev/null \
-          | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
-          echo "  Timeout waiting for auditor. Nudging..." >&2
-          hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "Report audit findings now." 2>/dev/null || true
-          [[ "$audit_tool" == "codex" ]] && hcom term inject "$audit_name" --enter 2>/dev/null || true
-          continue
-        }
+        sleep 15
+        audit_text=$(hcom events --type message --from "$audit_name" --after "$audit_start_ts" --sql "data LIKE '%AUDIT_RESULT%'" --last 1 2>/dev/null \
+          | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
         [[ -z "$audit_text" ]] && continue
 
         if echo "$audit_text" | grep -q "AUDIT_RESULT"; then
@@ -421,12 +416,11 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
 
               echo "  Waiting for bigboss decision..." >&2
 
+              boss_start_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
               while true; do
-                boss_text=$(hcom events --wait 600 --type message --from bigboss 2>/dev/null \
-                  | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || {
-                  echo "  Still waiting for bigboss..." >&2
-                  continue
-                }
+                sleep 15
+                boss_text=$(hcom events --type message --from bigboss --after "$boss_start_ts" --last 1 2>/dev/null \
+                  | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
                 [[ -z "$boss_text" ]] && continue
 
                 if echo "$boss_text" | grep -iq "override\|proceed\|skip\|accept"; then
@@ -478,7 +472,8 @@ When fixed, send a message containing 'PHASE_DONE: ${phase}' (to any agent or bi
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
 
       while true; do
-        boss_text=$(hcom events --wait 600 --type message --from bigboss 2>/dev/null \
+        sleep 15
+        boss_text=$(hcom events --type message --from bigboss --after "${boss_start_ts:-$phase_start_ts}" --last 1 2>/dev/null \
           | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
         [[ -z "$boss_text" ]] && continue
 
