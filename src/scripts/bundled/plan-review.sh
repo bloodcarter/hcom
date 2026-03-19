@@ -56,6 +56,7 @@ EOF
 plan_path=""
 codebase_path=""
 focus=""
+name_flag=""
 tool="codex"
 fatcow_tool="claude"
 work_dir=""
@@ -66,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --plan) plan_path="$2"; shift 2 ;;
     --codebase) codebase_path="$2"; shift 2 ;;
     --focus) focus="$2"; shift 2 ;;
+    --name) name_flag="$2"; shift 2 ;;
     --tool) tool="$2"; shift 2 ;;
     --fatcow-tool) fatcow_tool="$2"; shift 2 ;;
     --dir) work_dir="$2"; shift 2 ;;
@@ -84,19 +86,20 @@ codebase_abs=$(realpath "$codebase_path")
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# Controller identity
-ctrl_name="prev"
-hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
+# Resolve caller identity (same pattern as confess/debate/fatcow)
+name_arg=""
+[[ -n "$name_flag" ]] && name_arg="--name $name_flag"
+
+caller_json=$(hcom list self --json $name_arg 2>/dev/null) || {
+  echo "Error: could not resolve identity. Run inside an hcom session or pass --name." >&2
+  exit 1
+}
+caller_name=$(echo "$caller_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+echo "Controller: $caller_name" >&2
 
 batch_id="plan-review-$(date +%s)"
 
-# Keepalive: re-register identity every 60s to prevent stale cleanup
-keepalive_pid=""
-( while true; do sleep 60; hcom start --as "$ctrl_name" >/dev/null 2>&1 || true; done ) &
-keepalive_pid=$!
-
 cleanup() {
-  [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null || true
   if [[ ${#LAUNCHED_NAMES[@]} -gt 0 ]]; then
     echo "Cleaning up agents..." >&2
     for name in "${LAUNCHED_NAMES[@]}"; do
@@ -118,7 +121,7 @@ echo "" >&2
 echo "Before the reviewer starts, describe your intent:" >&2
 echo "  What problem does this plan solve?" >&2
 echo "  What does success look like?" >&2
-echo "  (Send via: hcom send @${ctrl_name} --intent inform -- 'your intent')" >&2
+echo "  (Send via: hcom send @${caller_name} --intent inform -- 'your intent')" >&2
 echo "  (Or type 'skip' if the plan file already describes the intent)" >&2
 echo "" >&2
 
@@ -330,10 +333,10 @@ while true; do
 
   echo "${issues_count} issues found. Discuss with reviewer via hcom." >&2
   echo "Options:" >&2
-  echo "  - Send feedback: hcom send @${ctrl_name} -- 'approve fix 1, reject fix 3, ...'" >&2
-  echo "  - Approve all: hcom send @${ctrl_name} -- 'approve all'" >&2
-  echo "  - Approve as-is: hcom send @${ctrl_name} -- 'lgtm' or 'done'" >&2
-  echo "  - Abort: hcom send @${ctrl_name} -- 'abort'" >&2
+  echo "  - Send feedback: hcom send @${caller_name} -- 'approve fix 1, reject fix 3, ...'" >&2
+  echo "  - Approve all: hcom send @${caller_name} -- 'approve all'" >&2
+  echo "  - Approve as-is: hcom send @${caller_name} -- 'lgtm' or 'done'" >&2
+  echo "  - Abort: hcom send @${caller_name} -- 'abort'" >&2
   echo "" >&2
 
   # Wait for bigboss response
@@ -374,7 +377,7 @@ Send updated REVIEW_REPORT to @bigboss."
     done
     hcom term inject "$reviewer_name" "$feedback_msg" --enter 2>/dev/null || true
   else
-    hcom send "@${reviewer_name}" --name "$ctrl_name" --intent request -- "$feedback_msg" 2>/dev/null || true
+    hcom send "@${reviewer_name}" $name_arg --intent request -- "$feedback_msg" 2>/dev/null || true
   fi
 
   # Check for PLAN_UPDATE from reviewer (plan rewrite)
@@ -425,7 +428,7 @@ echo "Verdict: $( [[ $issues_count -eq 0 ]] && echo 'ALL PASS' || echo 'APPROVED
 echo "Ready for: hcom run plan-execute --plan $plan_abs" >&2
 
 # Notify bigboss
-hcom send "@bigboss" --name "$ctrl_name" --intent inform -- \
+hcom send "@bigboss" $name_arg --intent inform -- \
   "PLAN REVIEW COMPLETE. Plan at ${plan_abs} is reviewed and ready for execution." 2>/dev/null || true
 
 # Cleanup

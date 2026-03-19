@@ -127,26 +127,16 @@ batch_id="plan-exec-$(date +%s)"
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# Register controller identity (visible in TUI)
-ctrl_name="pexc"
-hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
+# Resolve caller identity (same pattern as confess/debate/fatcow)
+name_arg=""
+[[ -n "$name_flag" ]] && name_arg="--name $name_flag"
 
-# Keepalive: re-register identity every 60s to prevent stale cleanup
-keepalive_pid=""
-( while true; do sleep 60; hcom start --as "$ctrl_name" >/dev/null 2>&1 || true; done ) &
-keepalive_pid=$!
-
-# Update cleanup to also kill keepalive
-original_cleanup=$(declare -f cleanup)
-cleanup() {
-  [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null || true
-  if [[ ${#LAUNCHED_NAMES[@]} -gt 0 ]]; then
-    echo "Cleaning up ${#LAUNCHED_NAMES[@]} launched agents..." >&2
-    for name in "${LAUNCHED_NAMES[@]}"; do
-      hcom stop "$name" --go 2>/dev/null || true
-    done
-  fi
+caller_json=$(hcom list self --json $name_arg 2>/dev/null) || {
+  echo "Error: could not resolve identity. Run inside an hcom session or pass --name." >&2
+  exit 1
 }
+caller_name=$(echo "$caller_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+echo "Controller: $caller_name" >&2
 
 trap cleanup EXIT ERR
 
@@ -229,7 +219,7 @@ HOW TO AUDIT each requirement:
 6. For 'wire into X' requirements: trace the actual integration point
 
 REPORT FORMAT — use EXACTLY this:
-hcom send '@${ctrl_name}' --intent inform -- 'AUDIT_RESULT: <phase_name>
+hcom send '@${caller_name}' --intent inform -- 'AUDIT_RESULT: <phase_name>
 VERDICT: PASS|FAIL
 <requirement>: PASS|FAIL — <specific file:line evidence>'
 
@@ -367,7 +357,7 @@ for i in "${!phases[@]}"; do
   echo "=== Phase ${phase_num}/${total_phases}: ${phase} ===" >&2
 
   # Send phase assignment to implementer
-  hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
+  hcom send "@${impl_name}" $name_arg --intent request -- \
     "PHASE ASSIGNMENT: ${phase}
 
 Read the plan file at ${plan_abs} and implement this phase.
@@ -402,7 +392,7 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
         done
         hcom term inject "$audit_name" "$audit_request" --enter 2>/dev/null || true
       else
-        hcom send "@${audit_name}" --name "$ctrl_name" --intent request -- "$audit_request" 2>/dev/null || true
+        hcom send "@${audit_name}" $name_arg --intent request -- "$audit_request" 2>/dev/null || true
       fi
 
       echo "  Audit requested" >&2
@@ -429,7 +419,7 @@ If you cannot meet a requirement, send a message containing 'PHASE_BLOCKED' with
               echo "  MAX RETRIES REACHED for phase: ${phase}" >&2
               echo "  Escalating to bigboss..." >&2
 
-              hcom send "@bigboss" --name "$ctrl_name" --intent request -- \
+              hcom send "@bigboss" $name_arg --intent request -- \
                 "ESCALATION: Phase '${phase}' failed audit ${max_retries} times.
 
 Last audit result:
@@ -465,7 +455,7 @@ Options: reply 'retry', 'override', or 'abort'." 2>/dev/null || true
             fi
 
             # Send failures to implementer
-            hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
+            hcom send "@${impl_name}" $name_arg --intent request -- \
               "AUDIT FAILED for phase: ${phase} (attempt ${retries}/${max_retries})
 
 Auditor findings:
@@ -489,7 +479,7 @@ When fixed, send a message containing 'PHASE_DONE: ${phase}' (to any agent or bi
       echo "  PHASE BLOCKED: ${phase}" >&2
       echo "  ${msg_text}" >&2
 
-      hcom send "@bigboss" --name "$ctrl_name" --intent request -- \
+      hcom send "@bigboss" $name_arg --intent request -- \
         "BLOCKED: Phase '${phase}' — ${msg_text}
 
 Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
@@ -505,10 +495,10 @@ Reply 'skip', 'abort', or provide guidance." 2>/dev/null || true
         elif echo "$boss_text" | grep -iq "abort\|stop\|cancel"; then
           cleanup; exit 1
         else
-          hcom send "@${impl_name}" --name "$ctrl_name" --intent request -- \
+          hcom send "@${impl_name}" $name_arg --intent request -- \
             "Bigboss guidance: ${boss_text}
 
-Try again. Report: hcom send '@${ctrl_name}' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
+Try again. Report: hcom send '@${caller_name}' --intent inform -- 'PHASE_DONE: ${phase}'" 2>/dev/null || true
           break
         fi
       done
@@ -523,7 +513,7 @@ echo "=== PLAN EXECUTION COMPLETE ===" >&2
 echo "Completed: ${completed}/${total_phases} phases (${skipped} skipped)" >&2
 echo "Plan: ${plan_abs}" >&2
 
-hcom send "@bigboss" --name "$ctrl_name" --intent inform -- \
+hcom send "@bigboss" $name_arg --intent inform -- \
   "PLAN EXECUTION COMPLETE: ${completed}/${total_phases} phases passed audit.
 Plan: ${plan_abs}
 All audited phases have independent PASS verification." 2>/dev/null || true
