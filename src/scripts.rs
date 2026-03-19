@@ -4,4 +4,5 @@ pub const SCRIPTS: &[(&str, &str)] = &[
     ("debate", include_str!("scripts/bundled/debate.sh")),
     ("fatcow", include_str!("scripts/bundled/fatcow.sh")),
     ("plan-execute", include_str!("scripts/bundled/plan-execute.sh")),
+    ("plan-review", include_str!("scripts/bundled/plan-review.sh")),
 ];
