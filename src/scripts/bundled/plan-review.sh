@@ -86,16 +86,9 @@ codebase_abs=$(realpath "$codebase_path")
 dir_flag=""
 [[ -n "$work_dir" ]] && dir_flag="-C $work_dir"
 
-# Resolve caller identity (same pattern as confess/debate/fatcow)
-name_arg=""
-[[ -n "$name_flag" ]] && name_arg="--name $name_flag"
-
-caller_json=$(hcom list self --json $name_arg 2>/dev/null) || {
-  echo "Error: could not resolve identity. Run inside an hcom session or pass --name." >&2
-  exit 1
-}
-caller_name=$(echo "$caller_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
-echo "Controller: $caller_name" >&2
+# Controller identity: use --from for sends (no registered identity needed)
+caller_name="${name_flag:-plan-review}"
+send_as="--from $caller_name"
 
 batch_id="plan-review-$(date +%s)"
 
@@ -386,7 +379,7 @@ Send updated REVIEW_REPORT to @bigboss."
     done
     hcom term inject "$reviewer_name" "$feedback_msg" --enter 2>/dev/null || true
   else
-    hcom send "@${reviewer_name}" $name_arg --intent request -- "$feedback_msg" 2>/dev/null || true
+    hcom send "@${reviewer_name}" $send_as --intent request -- "$feedback_msg" 2>/dev/null || true
   fi
 
   # Check for PLAN_UPDATE from reviewer (plan rewrite)
@@ -437,7 +430,7 @@ echo "Verdict: $( [[ $issues_count -eq 0 ]] && echo 'ALL PASS' || echo 'APPROVED
 echo "Ready for: hcom run plan-execute --plan $plan_abs" >&2
 
 # Notify bigboss
-hcom send "@bigboss" $name_arg --intent inform -- \
+hcom send "@bigboss" $send_as --intent inform -- \
   "PLAN REVIEW COMPLETE. Plan at ${plan_abs} is reviewed and ready for execution." 2>/dev/null || true
 
 # Cleanup
