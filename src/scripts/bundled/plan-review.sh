@@ -40,6 +40,7 @@ Options:
   --plan PATH          Plan file to review (required)
   --codebase PATH      Codebase directory for oracle (required)
   --focus TEXT          Comma-separated focus areas for oracle (optional)
+  --intent TEXT         What problem does this plan solve? (optional, prompted if omitted)
   --tool TOOL          Reviewer tool (default: codex)
   --fatcow-tool TOOL   Oracle tool (default: claude)
   --dir PATH           Working directory (optional)
@@ -47,7 +48,7 @@ Options:
 
 Examples:
   hcom run plan-review --plan docs/plans/my-feature.md --codebase src/
-  hcom run plan-review --plan docs/plans/refactor.md --codebase src/ --focus "auth,api"
+  hcom run plan-review --plan docs/plans/foo.md --codebase src/ --intent "fix double greetings, reduce latency"
 EOF
   exit 0
 }
@@ -57,6 +58,7 @@ plan_path=""
 codebase_path=""
 focus=""
 name_flag=""
+intent_flag=""
 tool="codex"
 fatcow_tool="claude"
 work_dir=""
@@ -68,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --codebase) codebase_path="$2"; shift 2 ;;
     --focus) focus="$2"; shift 2 ;;
     --name) name_flag="$2"; shift 2 ;;
+    --intent) intent_flag="$2"; shift 2 ;;
     --tool) tool="$2"; shift 2 ;;
     --fatcow-tool) fatcow_tool="$2"; shift 2 ;;
     --dir) work_dir="$2"; shift 2 ;;
@@ -104,45 +107,19 @@ cleanup() {
 
 trap cleanup EXIT ERR
 
-# --- Phase 0: Intent Gathering ---
+# --- Phase 0: Intent ---
 
 echo "" >&2
 echo "=== PLAN REVIEW ===" >&2
 echo "Plan: $plan_abs" >&2
 echo "Codebase: $codebase_abs" >&2
-echo "" >&2
-echo "Before the reviewer starts, describe your intent:" >&2
-echo "  What problem does this plan solve?" >&2
-echo "  What does success look like?" >&2
-echo "  (Send via: hcom send @${caller_name} --intent inform -- 'your intent')" >&2
-echo "  (Or type 'skip' if the plan file already describes the intent)" >&2
-echo "" >&2
 
-# Wait for bigboss intent statement
-intent_text=""
-intent_start_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-while true; do
-  sleep 10
-  intent_text=$(hcom events --type message --after "$intent_start_ts" --last 1 2>/dev/null \
-    | python3 -c "
-import sys, json
-line = sys.stdin.readline().strip()
-if not line: sys.exit(1)
-d = json.loads(line)
-fr = d.get('data',{}).get('from','')
-# Skip system/event messages
-if fr.startswith('[') or fr == '': sys.exit(1)
-print(d.get('data',{}).get('text',''))
-" 2>/dev/null) || continue
-  [[ -z "$intent_text" ]] && continue
-  break
-done
-
-if echo "$intent_text" | grep -iq "skip"; then
-  intent_text="(Intent derived from plan file — see plan context section)"
-  echo "  Skipping intent — reviewer will extract from plan file." >&2
+if [[ -n "$intent_flag" ]]; then
+  intent_text="$intent_flag"
+  echo "Intent: $intent_text" >&2
 else
-  echo "  Intent received." >&2
+  intent_text="(Intent derived from plan file — reviewer will extract from context section)"
+  echo "No --intent provided — reviewer will extract from plan file." >&2
 fi
 
 # --- Launch Fatcow ---
