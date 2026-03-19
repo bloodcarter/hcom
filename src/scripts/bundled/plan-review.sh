@@ -130,8 +130,17 @@ intent_text=""
 intent_start_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 while true; do
   sleep 10
-  intent_text=$(hcom events --type message --from bigboss --after "$intent_start_ts" --last 1 2>/dev/null \
-    | python3 -c "import sys,json; d=json.loads(sys.stdin.readline().strip()); print(d.get('data',{}).get('text',''))" 2>/dev/null) || continue
+  intent_text=$(hcom events --type message --after "$intent_start_ts" --last 1 2>/dev/null \
+    | python3 -c "
+import sys, json
+line = sys.stdin.readline().strip()
+if not line: sys.exit(1)
+d = json.loads(line)
+fr = d.get('data',{}).get('from','')
+# Skip system/event messages
+if fr.startswith('[') or fr == '': sys.exit(1)
+print(d.get('data',{}).get('text',''))
+" 2>/dev/null) || continue
   [[ -z "$intent_text" ]] && continue
   break
 done
