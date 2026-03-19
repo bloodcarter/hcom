@@ -131,7 +131,24 @@ dir_flag=""
 ctrl_name="pexc"
 hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
 
-trap cleanup ERR
+# Keepalive: re-register identity every 60s to prevent stale cleanup
+keepalive_pid=""
+( while true; do sleep 60; hcom start --as "$ctrl_name" >/dev/null 2>&1 || true; done ) &
+keepalive_pid=$!
+
+# Update cleanup to also kill keepalive
+original_cleanup=$(declare -f cleanup)
+cleanup() {
+  [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null || true
+  if [[ ${#LAUNCHED_NAMES[@]} -gt 0 ]]; then
+    echo "Cleaning up ${#LAUNCHED_NAMES[@]} launched agents..." >&2
+    for name in "${LAUNCHED_NAMES[@]}"; do
+      hcom stop "$name" --go 2>/dev/null || true
+    done
+  fi
+}
+
+trap cleanup EXIT ERR
 
 # --- Launch Implementer ---
 

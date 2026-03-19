@@ -15,16 +15,7 @@
 set -euo pipefail
 
 LAUNCHED_NAMES=()
-cleanup() {
-  if [[ ${#LAUNCHED_NAMES[@]} -gt 0 ]]; then
-    echo "Cleaning up agents..." >&2
-    for name in "${LAUNCHED_NAMES[@]}"; do
-      hcom stop "$name" --go 2>/dev/null || true
-    done
-  fi
-  # Clean temp files
-  [[ -n "${review_instructions_file:-}" ]] && rm -f "$review_instructions_file"
-}
+# cleanup defined after keepalive_pid is set (see controller identity section)
 track_launch() {
   local output="$1"
   local names
@@ -98,7 +89,24 @@ ctrl_name="prev"
 hcom start --as "$ctrl_name" >/dev/null 2>&1 || true
 
 batch_id="plan-review-$(date +%s)"
-trap cleanup ERR
+
+# Keepalive: re-register identity every 60s to prevent stale cleanup
+keepalive_pid=""
+( while true; do sleep 60; hcom start --as "$ctrl_name" >/dev/null 2>&1 || true; done ) &
+keepalive_pid=$!
+
+cleanup() {
+  [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null || true
+  if [[ ${#LAUNCHED_NAMES[@]} -gt 0 ]]; then
+    echo "Cleaning up agents..." >&2
+    for name in "${LAUNCHED_NAMES[@]}"; do
+      hcom stop "$name" --go 2>/dev/null || true
+    done
+  fi
+  [[ -n "${review_instructions_file:-}" ]] && rm -f "$review_instructions_file"
+}
+
+trap cleanup EXIT ERR
 
 # --- Phase 0: Intent Gathering ---
 
