@@ -116,6 +116,55 @@ fn lookup_bundle_transcript_source(
     (None, "claude".into(), None)
 }
 
+fn detect_bundle_transcript_tool(path: &str) -> String {
+    if path.contains(".claude") || path.contains("/projects/") {
+        "claude".to_string()
+    } else if path.contains(".gemini") {
+        "gemini".to_string()
+    } else if path.contains(".codex") || path.contains("codex") {
+        "codex".to_string()
+    } else if path.contains("opencode") || path.ends_with(".db") {
+        "opencode".to_string()
+    } else {
+        "claude".to_string()
+    }
+}
+
+fn infer_session_id_from_transcript_path(tool: &str, path: &str) -> Option<String> {
+    let p = Path::new(path);
+    match tool {
+        "claude" => p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+fn lookup_bundle_cat_transcript_source(
+    db: &HcomDb,
+    created_by: &str,
+    refs: &Value,
+) -> (Option<String>, String, Option<String>) {
+    let (path, tool, sid) = lookup_bundle_transcript_source(db, created_by);
+    if path.as_deref().is_some_and(|p| Path::new(p).exists()) {
+        return (path, tool, sid);
+    }
+
+    if let Some(files) = refs.get("files").and_then(|v| v.as_array()) {
+        for f in files.iter().filter_map(|v| v.as_str()) {
+            if !Path::new(f).exists() {
+                continue;
+            }
+            let tool = detect_bundle_transcript_tool(f);
+            let sid = infer_session_id_from_transcript_path(&tool, f);
+            return (Some(f.to_string()), tool, sid);
+        }
+    }
+
+    (path, tool, sid)
+}
+
 /// Parsed arguments for `hcom bundle`.
 ///
 /// Uses manual subcommand routing to support:
@@ -590,23 +639,8 @@ fn cmd_bundle_cat(db: &HcomDb, args: &BundleCatArgs) -> i32 {
             println!("TRANSCRIPT ({} entries)", transcript.len());
             println!("{sep}\n");
 
-            // Get transcript path from instance data
-            let transcript_path: Option<String> = db
-                .conn()
-                .query_row(
-                    "SELECT transcript_path FROM instances WHERE name = ?",
-                    rusqlite::params![created_by],
-                    |row| row.get(0),
-                )
-                .ok();
-            let (tool, session_id): (String, Option<String>) = db
-                .conn()
-                .query_row(
-                    "SELECT tool, session_id FROM instances WHERE name = ?",
-                    rusqlite::params![created_by],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .unwrap_or_else(|_| ("claude".into(), None));
+            let (transcript_path, tool, session_id) =
+                lookup_bundle_cat_transcript_source(db, created_by, refs);
 
             if let Some(ref tpath) = transcript_path {
                 if Path::new(tpath).exists() {
@@ -1624,5 +1658,29 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn test_lookup_bundle_cat_transcript_source_falls_back_to_refs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("claude.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"user","message":{"role":"user","content":"hello"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}"#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let refs = json!({
+            "files": [transcript_path.to_string_lossy().to_string()],
+            "events": [],
+            "transcript": [{"range":"1-1","detail":"normal"}]
+        });
+
+        let (path, tool, sid) = lookup_bundle_cat_transcript_source(&db, "harness", &refs);
+        assert_eq!(path.as_deref(), Some(transcript_path.to_string_lossy().as_ref()));
+        assert_eq!(tool, "claude");
+        assert_eq!(sid.as_deref(), Some(transcript_path.file_stem().unwrap().to_string_lossy().as_ref()));
     }
 }
