@@ -3,8 +3,8 @@
 //!
 //! Subcommands: list, show, cat, chain, prepare/preview, create.
 
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -14,6 +14,45 @@ use crate::shared::{CommandContext, SenderKind};
 
 // Re-use transcript parsing for bundle prepare/cat (C5 fix)
 use super::transcript::{TranscriptQuery, format_exchanges_pub, get_exchanges_pub};
+
+fn derive_claude_transcript_path(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let home = dirs::home_dir()?;
+    let pattern = format!(
+        "{}/.claude/projects/**/{}.jsonl",
+        home.display(),
+        session_id
+    );
+
+    let mut matches: Vec<PathBuf> = glob::glob(&pattern).ok()?.flatten().collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort_by(|a, b| {
+        let ta = a
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        let tb = b
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        tb.cmp(&ta)
+    });
+    matches.first().map(|p| p.to_string_lossy().to_string())
+}
+
+fn derive_transcript_path_for_tool(tool: &str, session_id: &str) -> Option<String> {
+    match tool {
+        "claude" => derive_claude_transcript_path(session_id),
+        "codex" => crate::hooks::codex::derive_codex_transcript_path(session_id),
+        "gemini" => crate::hooks::gemini::derive_gemini_transcript_path(session_id),
+        _ => None,
+    }
+}
 
 fn lookup_bundle_transcript_source(
     db: &HcomDb,
@@ -30,6 +69,14 @@ fn lookup_bundle_transcript_source(
             ))
         },
     ) {
+        if path.as_deref().is_some_and(|p| !p.is_empty()) {
+            return (path, tool, sid);
+        }
+        if let Some(ref session_id) = sid {
+            if let Some(derived) = derive_transcript_path_for_tool(&tool, session_id) {
+                return (Some(derived), tool, Some(session_id.clone()));
+            }
+        }
         return (path, tool, sid);
     }
 
@@ -42,7 +89,6 @@ fn lookup_bundle_transcript_source(
          WHERE type = 'life'
            AND instance = ?
            AND json_extract(data, '$.action') = 'stopped'
-           AND json_extract(data, '$.snapshot.transcript_path') IS NOT NULL
          ORDER BY id DESC
          LIMIT 1",
         rusqlite::params![agent],
@@ -54,6 +100,16 @@ fn lookup_bundle_transcript_source(
             ))
         },
     ) {
+        if path.as_deref().is_some_and(|p| !p.is_empty()) {
+            return (path, tool, sid);
+        }
+        if let Some(ref session_id) = sid {
+            let tool = if tool.is_empty() { "claude".to_string() } else { tool };
+            if let Some(derived) = derive_transcript_path_for_tool(&tool, session_id) {
+                return (Some(derived), tool, Some(session_id.clone()));
+            }
+            return (None, tool, Some(session_id.clone()));
+        }
         return (path, tool, sid);
     }
 
@@ -1373,6 +1429,9 @@ mod tests {
     use super::*;
     use crate::shared::time::now_epoch_f64;
     use std::fs;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_format_age() {
@@ -1496,9 +1555,18 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_bundle_transcript_source_falls_back_to_stopped_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let transcript_path = dir.path().join("claude.jsonl");
+    fn test_lookup_bundle_transcript_source_derives_stopped_claude_path_from_session_id() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let temp_home = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+        }
+
+        let sid = "sess-123";
+        let project_dir = temp_home.path().join(".claude/projects/proj1");
+        fs::create_dir_all(&project_dir).unwrap();
+        let transcript_path = project_dir.join(format!("{sid}.jsonl"));
         let db = test_db();
 
         let lines = [
@@ -1530,8 +1598,7 @@ mod tests {
         let snapshot = json!({
             "name": "huno",
             "tool": "claude",
-            "session_id": "sess-123",
-            "transcript_path": transcript_path.to_string_lossy().to_string(),
+            "session_id": sid,
             "created_at": now_epoch_f64(),
         });
         db.log_life_event("huno", "stopped", "cli", "killed", Some(snapshot))
@@ -1552,5 +1619,10 @@ mod tests {
         let exchanges = get_exchanges_pub(&tq).unwrap();
         assert_eq!(exchanges.len(), 1);
         assert_eq!(exchanges[0]["position"], 1);
+
+        match old_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }
