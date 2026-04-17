@@ -1983,6 +1983,47 @@ pub fn get_claude_settings_path() -> PathBuf {
     claude_config_dir().join("settings.json")
 }
 
+/// Derive a Claude transcript path from a session_id by globbing
+/// `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/**/<sid>.jsonl` and returning the
+/// most recently modified match. Returns `None` if `session_id` is empty or no
+/// file matches. Glob metacharacters in `session_id` are escaped so a crafted
+/// id can't widen the search.
+pub fn derive_claude_transcript_path(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let claude_base = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".claude").to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
+
+    let projects_dir = PathBuf::from(&claude_base).join("projects");
+    let escaped_sid = glob::Pattern::escape(session_id);
+    let pattern = format!("{}/**/{}.jsonl", projects_dir.display(), escaped_sid);
+
+    let mut matches: Vec<PathBuf> = glob::glob(&pattern).ok()?.flatten().collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort_by(|a, b| {
+        let ta = a
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let tb = b
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        tb.cmp(&ta)
+    });
+    matches.first().map(|p| p.to_string_lossy().to_string())
+}
+
 /// Load and parse Claude settings.json. Returns None on error or missing file.
 pub fn load_claude_settings(settings_path: &Path) -> Option<Value> {
     let content = std::fs::read_to_string(settings_path).ok()?;

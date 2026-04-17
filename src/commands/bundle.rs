@@ -3,8 +3,8 @@
 //!
 //! Subcommands: list, show, cat, chain, prepare/preview, create.
 
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
@@ -15,51 +15,37 @@ use crate::shared::{CommandContext, SenderKind};
 // Re-use transcript parsing for bundle prepare/cat (C5 fix)
 use super::transcript::{TranscriptQuery, format_exchanges_pub, get_exchanges_pub};
 
-fn derive_claude_transcript_path(session_id: &str) -> Option<String> {
-    if session_id.is_empty() {
-        return None;
-    }
-
-    let home = dirs::home_dir()?;
-    let pattern = format!(
-        "{}/.claude/projects/**/{}.jsonl",
-        home.display(),
-        session_id
-    );
-
-    let mut matches: Vec<PathBuf> = glob::glob(&pattern).ok()?.flatten().collect();
-    if matches.is_empty() {
-        return None;
-    }
-    matches.sort_by(|a, b| {
-        let ta = a
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(UNIX_EPOCH);
-        let tb = b
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(UNIX_EPOCH);
-        tb.cmp(&ta)
-    });
-    matches.first().map(|p| p.to_string_lossy().to_string())
-}
-
 fn derive_transcript_path_for_tool(tool: &str, session_id: &str) -> Option<String> {
     match tool {
-        "claude" => derive_claude_transcript_path(session_id),
+        "claude" => crate::hooks::claude::derive_claude_transcript_path(session_id),
         "codex" => crate::hooks::codex::derive_codex_transcript_path(session_id),
         "gemini" => crate::hooks::gemini::derive_gemini_transcript_path(session_id),
         _ => None,
     }
 }
 
+fn path_is_live(p: &Option<String>) -> bool {
+    p.as_deref()
+        .is_some_and(|s| !s.is_empty() && Path::new(s).exists())
+}
+
+/// Resolve the transcript source for a bundled agent, tolerant of missing or
+/// stale instance state. Tries, in order:
+///   1. `instances` row with a stored path that still exists on disk;
+///   2. derive from the row's `session_id` when the stored path is missing or
+///      stale;
+///   3. most recent `stopped` life-event snapshot with a live path;
+///   4. derive from the snapshot's `session_id`.
+/// Returns `(path, tool, session_id)`; `path` may be `None` or point at a
+/// non-existent file when nothing resolves. Callers should re-check existence
+/// before reading.
 fn lookup_bundle_transcript_source(
     db: &HcomDb,
     agent: &str,
 ) -> (Option<String>, String, Option<String>) {
     if let Ok((path, tool, sid)) = db.conn().query_row(
-        "SELECT transcript_path, tool, session_id FROM instances WHERE name = ?",
+        "SELECT transcript_path, COALESCE(tool, ''), session_id
+         FROM instances WHERE name = ?",
         rusqlite::params![agent],
         |row| {
             Ok((
@@ -69,7 +55,12 @@ fn lookup_bundle_transcript_source(
             ))
         },
     ) {
-        if path.as_deref().is_some_and(|p| !p.is_empty()) {
+        let tool = if tool.is_empty() {
+            "claude".to_string()
+        } else {
+            tool
+        };
+        if path_is_live(&path) {
             return (path, tool, sid);
         }
         if let Some(ref session_id) = sid {
@@ -83,7 +74,7 @@ fn lookup_bundle_transcript_source(
     if let Ok((path, tool, sid)) = db.conn().query_row(
         "SELECT
             json_extract(data, '$.snapshot.transcript_path'),
-            json_extract(data, '$.snapshot.tool'),
+            COALESCE(json_extract(data, '$.snapshot.tool'), ''),
             json_extract(data, '$.snapshot.session_id')
          FROM events
          WHERE type = 'life'
@@ -100,11 +91,15 @@ fn lookup_bundle_transcript_source(
             ))
         },
     ) {
-        if path.as_deref().is_some_and(|p| !p.is_empty()) {
+        let tool = if tool.is_empty() {
+            "claude".to_string()
+        } else {
+            tool
+        };
+        if path_is_live(&path) {
             return (path, tool, sid);
         }
         if let Some(ref session_id) = sid {
-            let tool = if tool.is_empty() { "claude".to_string() } else { tool };
             if let Some(derived) = derive_transcript_path_for_tool(&tool, session_id) {
                 return (Some(derived), tool, Some(session_id.clone()));
             }
@@ -116,31 +111,64 @@ fn lookup_bundle_transcript_source(
     (None, "claude".into(), None)
 }
 
-fn detect_bundle_transcript_tool(path: &str) -> String {
-    if path.contains(".claude") || path.contains("/projects/") {
-        "claude".to_string()
-    } else if path.contains(".gemini") {
-        "gemini".to_string()
-    } else if path.contains(".codex") || path.contains("codex") {
-        "codex".to_string()
-    } else if path.contains("opencode") || path.ends_with(".db") {
-        "opencode".to_string()
-    } else {
-        "claude".to_string()
-    }
-}
-
-fn infer_session_id_from_transcript_path(tool: &str, path: &str) -> Option<String> {
+/// Detect which tool produced a given transcript file, from its extension and
+/// any known tool-config directory in the path. Returns `None` when the file
+/// doesn't have a recognised transcript extension, so callers can reject
+/// arbitrary source files listed alongside transcripts in `refs.files`.
+fn detect_bundle_transcript_tool(path: &str) -> Option<&'static str> {
     let p = Path::new(path);
-    match tool {
-        "claude" => p
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty()),
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Extension gate — only recognised transcript shapes are acceptable.
+    match ext.as_str() {
+        "db" => return Some("opencode"),
+        "jsonl" | "json" => {}
+        _ => return None,
+    }
+
+    // Prefer matching a tool's config directory as a full path component.
+    for comp in p.components() {
+        if let std::path::Component::Normal(os) = comp {
+            match os.to_string_lossy().as_ref() {
+                ".claude" => return Some("claude"),
+                ".gemini" => return Some("gemini"),
+                ".codex" => return Some("codex"),
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback by extension: .jsonl → claude (most common), .json → gemini.
+    match ext.as_str() {
+        "jsonl" => Some("claude"),
+        "json" => Some("gemini"),
         _ => None,
     }
 }
 
+fn infer_session_id_from_transcript_path(tool: &str, path: &str) -> Option<String> {
+    // Claude names transcripts `<session-id>.jsonl`. Codex encodes the sid
+    // inside a `rollout-<ts>-<sid>.jsonl` filename and opencode stores it in
+    // the sqlite rows, so filename-stem inference only applies to claude.
+    if tool != "claude" {
+        return None;
+    }
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// `bundle cat` extends `lookup_bundle_transcript_source` with one more
+/// fallback: the bundle's own `refs.files` list. Useful when the producing
+/// agent's row has been pruned and no stopped snapshot exists, but the bundle
+/// still carries the transcript path captured at create time. `refs.files`
+/// also contains user-supplied source files, so we require a recognised
+/// transcript extension before accepting an entry.
 fn lookup_bundle_cat_transcript_source(
     db: &HcomDb,
     created_by: &str,
@@ -156,9 +184,11 @@ fn lookup_bundle_cat_transcript_source(
             if !Path::new(f).exists() {
                 continue;
             }
-            let tool = detect_bundle_transcript_tool(f);
-            let sid = infer_session_id_from_transcript_path(&tool, f);
-            return (Some(f.to_string()), tool, sid);
+            let Some(detected) = detect_bundle_transcript_tool(f) else {
+                continue;
+            };
+            let sid = infer_session_id_from_transcript_path(detected, f);
+            return (Some(f.to_string()), detected.to_string(), sid);
         }
     }
 
@@ -1462,10 +1492,32 @@ pub fn cmd_bundle(db: &HcomDb, args: &BundleArgs, ctx: Option<&CommandContext>) 
 mod tests {
     use super::*;
     use crate::shared::time::now_epoch_f64;
+    use serial_test::serial;
     use std::fs;
-    use std::sync::Mutex;
 
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    /// Set `CLAUDE_CONFIG_DIR` for the duration of a test, restoring the prior
+    /// value (or unset state) when the guard drops — even on panic. Pair with
+    /// `#[serial]` so parallel tests don't race on the env var.
+    struct ClaudeDirGuard {
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl ClaudeDirGuard {
+        fn set(value: &Path) -> Self {
+            let saved = std::env::var_os("CLAUDE_CONFIG_DIR");
+            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", value) };
+            Self { saved }
+        }
+    }
+
+    impl Drop for ClaudeDirGuard {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
+                None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
+            }
+        }
+    }
 
     #[test]
     fn test_format_age() {
@@ -1588,21 +1640,8 @@ mod tests {
         db
     }
 
-    #[test]
-    fn test_lookup_bundle_transcript_source_derives_stopped_claude_path_from_session_id() {
-        let _guard = HOME_LOCK.lock().unwrap();
-        let temp_home = tempfile::tempdir().unwrap();
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", temp_home.path());
-        }
-
-        let sid = "sess-123";
-        let project_dir = temp_home.path().join(".claude/projects/proj1");
-        fs::create_dir_all(&project_dir).unwrap();
-        let transcript_path = project_dir.join(format!("{sid}.jsonl"));
-        let db = test_db();
-
+    /// Write a minimal 1-exchange claude JSONL transcript at `path`.
+    fn write_claude_jsonl(path: &Path) {
         let lines = [
             json!({
                 "type": "user",
@@ -1620,7 +1659,7 @@ mod tests {
             }),
         ];
         fs::write(
-            &transcript_path,
+            path,
             lines
                 .iter()
                 .map(serde_json::Value::to_string)
@@ -1628,48 +1667,175 @@ mod tests {
                 .join("\n"),
         )
         .unwrap();
+    }
 
-        let snapshot = json!({
-            "name": "huno",
-            "tool": "claude",
-            "session_id": sid,
-            "created_at": now_epoch_f64(),
-        });
-        db.log_life_event("huno", "stopped", "cli", "killed", Some(snapshot))
-            .unwrap();
+    /// Create `<claude_dir>/projects/<proj>/<sid>.jsonl` and return its path.
+    fn seed_claude_transcript(claude_dir: &Path, project: &str, sid: &str) -> std::path::PathBuf {
+        let project_dir = claude_dir.join("projects").join(project);
+        fs::create_dir_all(&project_dir).unwrap();
+        let path = project_dir.join(format!("{sid}.jsonl"));
+        write_claude_jsonl(&path);
+        path
+    }
 
-        let (path, tool, sid) = lookup_bundle_transcript_source(&db, "huno");
-        assert_eq!(path.as_deref(), Some(transcript_path.to_string_lossy().as_ref()));
+    #[test]
+    #[serial]
+    fn test_lookup_derives_stopped_claude_path_from_session_id() {
+        // Stopped life-event snapshot with just a session_id — the path must
+        // be derived from `<CLAUDE_CONFIG_DIR>/projects/**/<sid>.jsonl`.
+        let claude_dir = tempfile::tempdir().unwrap();
+        let _guard = ClaudeDirGuard::set(claude_dir.path());
+
+        let sid = "abc-123-def";
+        let transcript_path = seed_claude_transcript(claude_dir.path(), "proj1", sid);
+
+        let db = test_db();
+        db.log_life_event(
+            "huno",
+            "stopped",
+            "cli",
+            "killed",
+            Some(json!({
+                "name": "huno",
+                "tool": "claude",
+                "session_id": sid,
+                "created_at": now_epoch_f64(),
+            })),
+        )
+        .unwrap();
+
+        let (path, tool, got_sid) = lookup_bundle_transcript_source(&db, "huno");
+        assert_eq!(
+            path.as_deref(),
+            Some(transcript_path.to_string_lossy().as_ref())
+        );
         assert_eq!(tool, "claude");
-        assert_eq!(sid.as_deref(), Some("sess-123"));
+        assert_eq!(got_sid.as_deref(), Some(sid));
 
         let tq = TranscriptQuery {
             path: path.as_deref().unwrap(),
             agent: &tool,
             last: 10,
             detailed: false,
-            session_id: sid.as_deref(),
+            session_id: got_sid.as_deref(),
         };
         let exchanges = get_exchanges_pub(&tq).unwrap();
         assert_eq!(exchanges.len(), 1);
         assert_eq!(exchanges[0]["position"], 1);
-
-        match old_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 
     #[test]
-    fn test_lookup_bundle_cat_transcript_source_falls_back_to_refs_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let transcript_path = dir.path().join("claude.jsonl");
-        fs::write(
-            &transcript_path,
-            r#"{"type":"user","message":{"role":"user","content":"hello"}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}"#,
+    #[serial]
+    fn test_lookup_derives_when_instance_row_path_is_stale() {
+        // Instance row records a path that no longer exists on disk. The
+        // fallback must re-derive from `session_id` instead of returning the
+        // stale path — this was the exact bug the commit message claimed to
+        // fix but the guard previously short-circuited on any non-empty path.
+        let claude_dir = tempfile::tempdir().unwrap();
+        let _guard = ClaudeDirGuard::set(claude_dir.path());
+
+        let sid = "stale-row-sid";
+        let fresh = seed_claude_transcript(claude_dir.path(), "projA", sid);
+
+        let db = test_db();
+        // Register an instance with a non-existent `transcript_path`.
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, session_id, transcript_path, status, created_at)
+                 VALUES (?, 'claude', ?, '/tmp/deleted-long-ago.jsonl', 'inactive', ?)",
+                rusqlite::params![
+                    "stale-agent",
+                    sid,
+                    crate::shared::time::now_epoch_f64()
+                ],
+            )
+            .unwrap();
+
+        let (path, tool, got_sid) = lookup_bundle_transcript_source(&db, "stale-agent");
+        assert_eq!(path.as_deref(), Some(fresh.to_string_lossy().as_ref()));
+        assert_eq!(tool, "claude");
+        assert_eq!(got_sid.as_deref(), Some(sid));
+    }
+
+    #[test]
+    #[serial]
+    fn test_lookup_defaults_tool_when_snapshot_tool_is_null() {
+        // A stopped snapshot that omits `tool` must not abort the SQL row
+        // binding — the lookup should coalesce NULL to claude and still derive
+        // the path from `session_id`.
+        let claude_dir = tempfile::tempdir().unwrap();
+        let _guard = ClaudeDirGuard::set(claude_dir.path());
+
+        let sid = "null-tool-sid";
+        let fresh = seed_claude_transcript(claude_dir.path(), "projB", sid);
+
+        let db = test_db();
+        // Snapshot intentionally omits `tool`.
+        db.log_life_event(
+            "null-tool-agent",
+            "stopped",
+            "cli",
+            "killed",
+            Some(json!({
+                "name": "null-tool-agent",
+                "session_id": sid,
+                "created_at": now_epoch_f64(),
+            })),
         )
         .unwrap();
+
+        let (path, tool, got_sid) = lookup_bundle_transcript_source(&db, "null-tool-agent");
+        assert_eq!(path.as_deref(), Some(fresh.to_string_lossy().as_ref()));
+        assert_eq!(tool, "claude");
+        assert_eq!(got_sid.as_deref(), Some(sid));
+    }
+
+    #[test]
+    fn test_lookup_returns_none_when_no_rows_and_no_snapshot() {
+        let db = test_db();
+        let (path, tool, sid) = lookup_bundle_transcript_source(&db, "ghost");
+        assert!(path.is_none());
+        assert_eq!(tool, "claude");
+        assert!(sid.is_none());
+    }
+
+    #[test]
+    fn test_lookup_bundle_cat_prefers_db_path_over_refs_files() {
+        // When the primary lookup yields a live path, it wins — refs.files is
+        // only consulted as a fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("55555555-5555-5555-5555-555555555555.jsonl");
+        write_claude_jsonl(&primary);
+        let unrelated = dir.path().join("other.jsonl");
+        write_claude_jsonl(&unrelated);
+
+        let db = test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, session_id, transcript_path, status, created_at)
+                 VALUES (?, 'claude', NULL, ?, 'active', ?)",
+                rusqlite::params![
+                    "primary-wins",
+                    primary.to_string_lossy().to_string(),
+                    crate::shared::time::now_epoch_f64()
+                ],
+            )
+            .unwrap();
+
+        let refs = json!({ "files": [unrelated.to_string_lossy().to_string()] });
+        let (path, _, _) = lookup_bundle_cat_transcript_source(&db, "primary-wins", &refs);
+        assert_eq!(path.as_deref(), Some(primary.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_lookup_bundle_cat_falls_back_to_refs_files() {
+        // DB has no useful state → pick the first transcript-shaped file in
+        // refs.files. Using a UUID-shaped filename so the inferred session_id
+        // looks real.
+        let dir = tempfile::tempdir().unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let transcript_path = dir.path().join(format!("{sid}.jsonl"));
+        write_claude_jsonl(&transcript_path);
 
         let db = test_db();
         let refs = json!({
@@ -1678,9 +1844,138 @@ mod tests {
             "transcript": [{"range":"1-1","detail":"normal"}]
         });
 
-        let (path, tool, sid) = lookup_bundle_cat_transcript_source(&db, "harness", &refs);
-        assert_eq!(path.as_deref(), Some(transcript_path.to_string_lossy().as_ref()));
+        let (path, tool, got_sid) = lookup_bundle_cat_transcript_source(&db, "harness", &refs);
+        assert_eq!(
+            path.as_deref(),
+            Some(transcript_path.to_string_lossy().as_ref())
+        );
         assert_eq!(tool, "claude");
-        assert_eq!(sid.as_deref(), Some(transcript_path.file_stem().unwrap().to_string_lossy().as_ref()));
+        assert_eq!(got_sid.as_deref(), Some(sid));
+    }
+
+    #[test]
+    fn test_lookup_bundle_cat_skips_missing_and_non_transcript_entries() {
+        // refs.files is a user-supplied mix: a missing path, a source file,
+        // then a real transcript. Only the last one should be selected.
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("main.rs");
+        fs::write(&source_file, "fn main() {}\n").unwrap();
+        let transcript_path = dir
+            .path()
+            .join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+        write_claude_jsonl(&transcript_path);
+
+        let db = test_db();
+        let refs = json!({
+            "files": [
+                "/tmp/does-not-exist-12345.jsonl",
+                source_file.to_string_lossy().to_string(),
+                transcript_path.to_string_lossy().to_string(),
+            ]
+        });
+
+        let (path, tool, _) = lookup_bundle_cat_transcript_source(&db, "harness", &refs);
+        assert_eq!(
+            path.as_deref(),
+            Some(transcript_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(tool, "claude");
+    }
+
+    #[test]
+    fn test_lookup_bundle_cat_rejects_only_source_files() {
+        // refs.files exists but none of the entries is a transcript —
+        // return the (none/claude/none) tuple from the primary lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("notes.md");
+        fs::write(&source_file, "# notes\n").unwrap();
+
+        let db = test_db();
+        let refs = json!({
+            "files": [source_file.to_string_lossy().to_string()]
+        });
+
+        let (path, tool, sid) = lookup_bundle_cat_transcript_source(&db, "harness", &refs);
+        assert!(path.is_none());
+        assert_eq!(tool, "claude");
+        assert!(sid.is_none());
+    }
+
+    #[test]
+    fn test_detect_bundle_transcript_tool_classification() {
+        // Recognised transcript shapes.
+        assert_eq!(
+            detect_bundle_transcript_tool("/Users/x/.claude/projects/p/sid.jsonl"),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_bundle_transcript_tool("/Users/x/.codex/sessions/2026/rollout-1-sid.jsonl"),
+            Some("codex")
+        );
+        assert_eq!(
+            detect_bundle_transcript_tool("/Users/x/.gemini/tmp/session.json"),
+            Some("gemini")
+        );
+        assert_eq!(
+            detect_bundle_transcript_tool("/Users/x/opencode.db"),
+            Some("opencode")
+        );
+        // Bare .jsonl path without tool-dir falls back to claude.
+        assert_eq!(
+            detect_bundle_transcript_tool("/tmp/session.jsonl"),
+            Some("claude")
+        );
+        // Non-transcript extensions are rejected — this is what prevents the
+        // refs.files fallback from swallowing source files.
+        assert_eq!(detect_bundle_transcript_tool("/tmp/main.rs"), None);
+        assert_eq!(detect_bundle_transcript_tool("/tmp/notes.md"), None);
+        assert_eq!(detect_bundle_transcript_tool("/tmp/no-extension"), None);
+        // Paths containing the substring "codex" but wrong extension are not
+        // misclassified as codex transcripts.
+        assert_eq!(
+            detect_bundle_transcript_tool("/Users/x/codex-notes/readme.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_infer_session_id_only_for_claude() {
+        assert_eq!(
+            infer_session_id_from_transcript_path(
+                "claude",
+                "/Users/x/.claude/projects/p/abc-123.jsonl"
+            )
+            .as_deref(),
+            Some("abc-123")
+        );
+        // Non-claude tools don't expose the sid in the file stem.
+        assert!(
+            infer_session_id_from_transcript_path("codex", "/x/rollout-1-sid.jsonl").is_none()
+        );
+        assert!(infer_session_id_from_transcript_path("gemini", "/x/session.json").is_none());
+        assert!(infer_session_id_from_transcript_path("opencode", "/x/opencode.db").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_derive_claude_transcript_path_escapes_glob_metachars() {
+        // A session_id with a literal `*` must not widen the search: without
+        // escaping, `projects/**/*.jsonl` matches any transcript.
+        let claude_dir = tempfile::tempdir().unwrap();
+        let _guard = ClaudeDirGuard::set(claude_dir.path());
+        seed_claude_transcript(claude_dir.path(), "projX", "real-sid");
+
+        assert!(crate::hooks::claude::derive_claude_transcript_path("*").is_none());
+        assert!(crate::hooks::claude::derive_claude_transcript_path("").is_none());
+        assert_eq!(
+            crate::hooks::claude::derive_claude_transcript_path("real-sid").as_deref(),
+            Some(
+                claude_dir
+                    .path()
+                    .join("projects/projX/real-sid.jsonl")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
     }
 }
