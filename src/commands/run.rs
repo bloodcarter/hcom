@@ -585,11 +585,13 @@ mod tests {
 
     #[test]
     fn test_embedded_scripts_available() {
-        assert_eq!(scripts::SCRIPTS.len(), 3);
+        assert_eq!(scripts::SCRIPTS.len(), 5);
         let names: Vec<&str> = scripts::SCRIPTS.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"confess"));
         assert!(names.contains(&"debate"));
         assert!(names.contains(&"fatcow"));
+        assert!(names.contains(&"plan-execute"));
+        assert!(names.contains(&"plan-review"));
     }
 
     #[test]
